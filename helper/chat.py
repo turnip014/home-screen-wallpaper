@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -50,8 +51,9 @@ SYSTEM_PROMPT = (
     "overwrite or uninstall anything unless the user explicitly asked for exactly that.\n"
     "- open_claude_code: opens Claude Code (Anthropic's coding assistant) in a terminal, optionally in a "
     "project folder and with a first prompt. Use it when the user wants Claude, Claude Code or the Claude chat.\n"
-    "Every tool call is shown to the user, who must click Run before it happens, so briefly say what "
-    "you are about to do. If the user declines, accept it and don't retry. "
+    "Read-only commands (Get-*, Select-*, ipconfig, systeminfo and similar) run immediately. "
+    "Anything that changes the PC is shown to the user, who must click Run before it happens, so briefly say what "
+    "you are about to do. Never tell the user to click Run for read-only commands. If the user declines, accept it and don't retry. "
     "Make commands produce human-readable output (e.g. convert bytes to GB with [math]::Round(x/1GB,1)) "
     "and summarise results accurately from the output, never guess numbers. "
     "After a command runs you get its output: summarise the result plainly.\n"
@@ -80,6 +82,65 @@ TOOLS = [
     }},
 ]
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+
+
+# ---- read-only commands may run without a click (setting: chat.auto_run_readonly, default on)
+SAFE_VERBS = {"get", "select", "where", "sort", "format", "measure", "group", "compare", "test", "resolve",
+              "convertto", "convertfrom", "out"}
+SAFE_EXES = {"ipconfig", "systeminfo", "hostname", "whoami", "nvidia-smi", "ping", "tracert", "nslookup",
+             "netstat", "getmac", "driverquery", "tasklist", "ver", "where.exe", "findstr"}
+SAFE_ALIASES = {"gci", "ls", "dir", "gc", "cat", "type", "gps", "ps", "gsv", "gwmi", "gcim", "select", "where",
+                "sort", "ft", "fl", "measure", "group", "echo", "write-output"}
+UNSAFE_VERB_NOUNS = {"out-file", "out-printer", "out-gridview", "get-credential", "test-path"}  # writes / prompts / (test-path is fine but rarely needed)
+SAFE_METHODS = {"tostring", "trim", "trimend", "trimstart", "split", "replace", "substring", "tolower", "toupper",
+                "contains", "startswith", "endswith", "indexof", "padleft", "padright", "toshortdatestring",
+                "tolongdatestring", "round"}
+
+
+def is_read_only(command):
+    """Conservative check that a PowerShell command only reads information.
+
+    Every command in the pipeline (including inside { } blocks) must be a Get-/Select-/
+    Where-/Format-style cmdlet or a known diagnostic program; no redirection, no call
+    operator, no .NET static calls except [math], and only harmless string methods.
+    Anything unusual returns False, which just means the user is asked first.
+    """
+    c = command.strip()
+    if not c or len(c) > 600:
+        return False
+    if re.search(r"[<>`&]|\$\(|@\(", c):
+        return False  # redirection, call operator, subexpressions
+    if c.count("::") != len(re.findall(r"\[math\]::", c, re.I)):
+        return False  # .NET static calls other than [math]::Round etc.
+    for m in re.finditer(r"\.(\w+)\s*\(", c):
+        if m.group(1).lower() not in SAFE_METHODS:
+            return False
+    # strip quoted strings so their contents aren't mistaken for commands
+    bare = re.sub(r"'[^']*'|\"[^\"]*\"", "''", c)
+    parts = re.split(r"([|;{}()\n=])", bare)  # keep delimiters so we know what follows each segment
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        words = seg.strip().split()
+        if not words:
+            continue
+        first = words[0].lower()
+        if first in SAFE_EXES or first.removesuffix(".exe") in SAFE_EXES:
+            continue
+        nxt = parts[i + 1] if i + 1 < len(parts) else ""
+        if nxt == "=" and len(words) == 1 and re.fullmatch(r"\$?[\w:]+", words[0]):
+            continue  # hashtable key or variable name; what's assigned is checked as the next segment
+        if first[0] in "$'\"[-0123456789,.=" or first in ("''", "%", "?"):
+            continue  # expression / value, not a command
+        if first in ("foreach-object", "foreach", "where-object"):
+            continue  # their { } blocks are checked as segments too
+        if "-" in first and first not in UNSAFE_VERB_NOUNS:
+            if first.split("-", 1)[0] in SAFE_VERBS and (not first.startswith("out-") or first == "out-string"):
+                continue
+            return False
+        if first in SAFE_EXES or first.removesuffix(".exe") in SAFE_EXES or first in SAFE_ALIASES:
+            continue
+        return False
+    return True
 
 
 def run_powershell(command):
@@ -165,6 +226,7 @@ class Chat:
             "keep_alive": c.get("keep_alive") or "5m",
             "ollama": os.path.expandvars(c.get("ollama") or r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
             "models_dir": os.path.expandvars(c.get("models_dir") or ""),
+            "auto_run": c.get("auto_run_readonly", True) is not False,
         }
 
     def _pending(self):
@@ -312,6 +374,33 @@ class Chat:
                 self.data["thinking"] = False
                 self._bump()
                 self._save()
+                # look-only commands run straight away; anything else waits for the user's click
+                if actions and s["auto_run"] and all(
+                        a["name"] == "run_command" and is_read_only(str(a["args"].get("command", ""))) for a in actions):
+                    for a in actions:
+                        a["auto"], a["status"] = True, "running"
+                    self.data["busy"] = True
+                    self._bump()
+                    threading.Thread(target=self._run_auto, args=(out, actions), daemon=True).start()
+
+    def _run_auto(self, msg, actions):
+        for a in actions:
+            logging.info("chat: auto-running read-only command: %s", a["args"].get("command"))
+            try:
+                code, output = run_powershell(str(a["args"].get("command", "")))
+            except Exception as exc:
+                code, output = -1, f"Couldn't run it: {exc}"
+            with self.lock:
+                if msg not in self.data["messages"]:  # chat was cleared meanwhile
+                    self.data["busy"] = False
+                    self._bump()
+                    return
+                self._resolve(a, "done" if code == 0 else "error", output, code)
+                self._bump()
+        with self.lock:
+            self.data["busy"] = False
+            self._maybe_continue(msg)
+            self._save()
 
     # ---- approving / declining proposed actions
     def _find(self, action_id):

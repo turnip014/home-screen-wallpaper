@@ -974,7 +974,7 @@
     const head = document.createElement("div");
     head.className = "action-head";
     const isCmd = a.name === "run_command";
-    const title = isCmd ? "Run in PowerShell" : "Open Claude Code";
+    const title = isCmd ? (a.auto ? "PowerShell · read-only, ran automatically" : "Run in PowerShell") : "Open Claude Code";
     head.textContent = title;
     card.append(head);
     const args = a.args || {};
