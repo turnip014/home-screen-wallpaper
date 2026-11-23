@@ -56,3 +56,13 @@ Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Start-Process $pythonw -ArgumentList "`"$helper`"" -WorkingDirectory (Split-Path $helper)
 Write-Host 'Helper started (and set to start at login).'
+
+# 4. Wallpaper Engine keeps running the page it loaded earlier, so tell it to reload the new files
+$weExe = if ($we) { Join-Path $we 'wallpaper64.exe' }
+if ($weExe -and (Test-Path $weExe) -and (Get-Process wallpaper64 -ErrorAction SilentlyContinue)) {
+    # stop + play unloads and reloads the page ("openWallpaper" on the current wallpaper is a no-op)
+    & $weExe -control stop
+    Start-Sleep -Seconds 2
+    & $weExe -control play
+    Write-Host 'Wallpaper reloaded in Wallpaper Engine.'
+}

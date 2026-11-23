@@ -748,17 +748,23 @@
     for (let i = 0; i < 42; i++) {
       const cell = document.createElement("button");
       cell.className = "cal-day";
-      cell.textContent = d.getDate();
+      const num = document.createElement("span");
+      num.className = "num";
+      num.textContent = d.getDate();
+      cell.append(num);
       if (d.getMonth() !== C.month.getMonth()) cell.classList.add("other");
       if (sameDay(d, now)) cell.classList.add("today");
       if (C.selected && sameDay(d, C.selected)) cell.classList.add("selected");
       const evs = byDay.get(dayKey(d));
+      // a dots row on every day keeps the numbers aligned; event days get up to 3 dots and a highlight
+      const dots = document.createElement("span");
+      dots.className = "dots";
       if (evs) {
-        const dots = document.createElement("span");
-        dots.className = "dots";
+        cell.classList.add("has-ev");
+        cell.title = evs.map((ev) => ev.title).join("\n");
         evs.slice(0, 3).forEach((ev) => { const i = document.createElement("i"); if (ev.color) i.style.setProperty("--dot", ev.color); dots.append(i); });
-        cell.append(dots);
       }
+      cell.append(dots);
       const date = new Date(d);
       cell.addEventListener("click", () => {
         C.selected = C.selected && sameDay(C.selected, date) ? null : date; // tap again to go back to "Up next"

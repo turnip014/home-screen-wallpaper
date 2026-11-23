@@ -177,21 +177,31 @@ body.editing .remove-w { display: grid; animation: pop .35s var(--ease-spring) b
 .cal-grid.slide-prev { animation: calPrev .35s cubic-bezier(.2, .9, .3, 1) both; }
 @keyframes calNext { from { opacity: 0; transform: translateX(30px); } }
 @keyframes calPrev { from { opacity: 0; transform: translateX(-30px); } }
-.cal-day { position: relative; height: 40px; border-radius: 12px; font-size: 14px; font-variant-numeric: tabular-nums;
-  display: grid; place-items: center; transition: background .2s, transform .2s var(--ease-spring); }
-.cal-day:hover { background: rgba(255, 255, 255, .07); }
+.cal-grid { row-gap: 4px; column-gap: 4px; }
+.cal-day { position: relative; height: 50px; border-radius: 12px; font-size: 15px; font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  color: rgba(243, 244, 248, .55); transition: background .2s, transform .2s var(--ease-spring); }
+.cal-day .num { line-height: 1; }
+.cal-day:hover { background: rgba(255, 255, 255, .08); }
 .cal-day:active { transform: scale(.9); }
-.cal-day.other { color: rgba(243, 244, 248, .3); }
-.cal-day.today { background: var(--accent); color: #0d0f18; font-weight: 700; }
+/* days with events: lit up, bold, tinted */
+.cal-day.has-ev { color: var(--text); font-weight: 650; background: rgba(115, 140, 255, .13); }
+.cal-day.has-ev:hover { background: rgba(115, 140, 255, .22); }
+.cal-day.other { color: rgba(243, 244, 248, .22); }
+.cal-day.other.has-ev { color: rgba(243, 244, 248, .45); background: rgba(115, 140, 255, .06); }
+.cal-day.today { background: var(--accent); color: #0d0f18; font-weight: 750; }
 .cal-day.selected:not(.today) { box-shadow: inset 0 0 0 2px var(--accent); }
-.cal-day .dots { position: absolute; bottom: 5px; left: 0; right: 0; display: flex; justify-content: center; gap: 3px; }
-.cal-day .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--dot, var(--accent)); }
-.cal-day.today .dots i { background: #0d0f18; }
+.cal-day .dots { display: flex; justify-content: center; gap: 4px; height: 6px; }
+.cal-day .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--dot, var(--accent));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); }
+.cal-day.other .dots i { opacity: .5; }
+.cal-day.today .dots i { background: #0d0f18; box-shadow: none; }
 .cal-list { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--card-line); }
 .cal-list-head { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
-.cal-events { display: grid; gap: 4px; max-height: 260px; overflow: hidden; }
+.cal-events { display: grid; gap: 4px; max-height: 330px; overflow-y: auto; scrollbar-width: none; overscroll-behavior: contain; }
+.cal-events::-webkit-scrollbar { display: none; }
 .ev { display: grid; grid-template-columns: 4px 1fr; gap: 12px; padding: 7px 4px; animation: fadeUp .4s ease both; }
-.ev .bar { border-radius: 2px; background: var(--evc, var(--accent)); }
+.ev .bar { display: block; align-self: stretch; min-height: 100%; border-radius: 2px; background: var(--evc, var(--accent)); }
 .ev .when { font-size: 12.5px; color: var(--muted); }
 .ev .what { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ev .where { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
