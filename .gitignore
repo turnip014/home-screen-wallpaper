@@ -1,0 +1,12 @@
+# generated per machine by install.ps1 (contains the secret token)
+wallpaper/token.js
+
+__pycache__/
+*.py[cod]
+.venv/
+out/
+
+# OAuth client / secrets must never be committed
+client_secret*.json
+google_client*.json
+*.bin

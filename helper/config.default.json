@@ -1,0 +1,80 @@
+{
+  "sort": "added",
+  "include_public_desktop": true,
+  "recycle_bin": true,
+  "weather": {
+    "location": "auto",
+    "units": "metric"
+  },
+  "week_start": "monday",
+  "calendars": [
+    {
+      "name": "Personal",
+      "url": "",
+      "color": "#738cff"
+    }
+  ],
+  "markets": [
+    {
+      "symbol": "^GSPC",
+      "name": "S&P 500"
+    },
+    {
+      "symbol": "^NDX",
+      "name": "Nasdaq 100"
+    },
+    {
+      "symbol": "GC=F",
+      "name": "Gold"
+    },
+    {
+      "symbol": "SI=F",
+      "name": "Silver"
+    },
+    {
+      "symbol": "BTC-USD",
+      "name": "Bitcoin"
+    },
+    {
+      "symbol": "DX-Y.NYB",
+      "name": "US Dollar"
+    }
+  ],
+  "dock": [
+    {
+      "name": "File Explorer",
+      "path": "%WINDIR%\\explorer.exe"
+    },
+    {
+      "name": "Steam",
+      "path": "%ProgramFiles(x86)%\\Steam\\steam.exe"
+    },
+    {
+      "name": "Spotify",
+      "path": "%APPDATA%\\Spotify\\Spotify.exe",
+      "app": "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+      "uri": "spotify:",
+      "glyph": "music"
+    },
+    {
+      "name": "Brave",
+      "path": "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+    },
+    {
+      "name": "Visual Studio Code",
+      "path": "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe"
+    },
+    {
+      "name": "Settings",
+      "app": "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel",
+      "uri": "ms-settings:",
+      "glyph": "settings"
+    }
+  ],
+  "chat": {
+    "model": "qwen3:30b",
+    "keep_alive": "5m",
+    "ollama": "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe",
+    "models_dir": ""
+  }
+}

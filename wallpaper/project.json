@@ -1,0 +1,18 @@
+{
+  "file": "index.html",
+  "title": "Home Screen",
+  "type": "web",
+  "description": "Phone-style home screen: live desktop apps and folders, dock, clock, Spotify, system stats.",
+  "general": {
+    "supportsaudioprocessing": true,
+    "properties": {
+      "audioreact": { "order": 6, "text": "React to music", "type": "bool", "value": true },
+      "interactive": { "order": 7, "text": "Cursor effects (parallax, glow, tilt)", "type": "bool", "value": true },
+      "accent": { "order": 0, "text": "Accent color", "type": "color", "value": "0.45 0.55 1" },
+      "clock24": { "order": 1, "text": "24-hour clock", "type": "bool", "value": false },
+      "animate": { "order": 2, "text": "Animated background", "type": "bool", "value": true },
+      "iconsize": { "order": 4, "text": "Icon size", "type": "slider", "min": 64, "max": 128, "value": 92 },
+      "columns": { "order": 5, "text": "App grid columns", "type": "slider", "min": 4, "max": 10, "value": 7 }
+    }
+  }
+}

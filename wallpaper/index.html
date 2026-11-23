@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Screen</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="token.js"></script>
+</head>
+<body>
+  <div class="bg" id="bg" aria-hidden="true">
+    <div class="layer l1" data-depth="90"><div class="blob b1"></div></div>
+    <div class="layer l2" data-depth="-130"><div class="blob b2"></div></div>
+    <div class="layer l3" data-depth="60"><div class="blob b3"></div></div>
+    <div class="layer l4" data-depth="-80"><div class="blob b4"></div></div>
+    <div class="glow" id="glow"></div>
+  </div>
+  <div class="ripples" id="ripples" aria-hidden="true"></div>
+
+  <!-- edit mode: hidden widgets + Done -->
+  <div class="tray" id="tray" hidden>
+    <span class="tray-hint">Drag widgets to move them</span>
+    <div class="tray-items" id="trayItems"></div>
+    <button class="pill done" id="done">Done</button>
+  </div>
+
+  <main class="shell" id="shell">
+    <aside class="col" data-col="farleft"></aside>
+    <aside class="col" data-col="left"></aside>
+
+    <section class="apps" id="apps">
+      <div class="viewport" id="viewport">
+        <div class="pages" id="pages"></div>
+      </div>
+      <div class="dots" id="dots"></div>
+      <div class="notice" id="notice" hidden></div>
+    </section>
+
+    <aside class="col" data-col="right"></aside>
+    <aside class="col" data-col="farright"></aside>
+  </main>
+
+  <!-- widgets: placed into the columns above by app.js (saved layout or defaults) -->
+  <div id="widgetStore" hidden>
+    <section class="card widget clock" data-widget="clock" data-title="Clock">
+      <div class="greeting" id="greeting"></div>
+      <div class="time" id="time">--:--</div>
+      <div class="date" id="date"></div>
+    </section>
+
+    <section class="card widget weather" data-widget="weather" data-title="Weather">
+      <div class="w-now">
+        <div class="w-icon" id="wIcon"></div>
+        <div class="w-main">
+          <div class="w-temp" id="wTemp">--°</div>
+          <div class="w-desc" id="wDesc">Loading weather…</div>
+        </div>
+        <div class="w-side">
+          <div class="w-place" id="wPlace"></div>
+          <div class="w-meta" id="wMeta"></div>
+        </div>
+      </div>
+      <div class="w-hours" id="wHours"></div>
+      <div class="w-days" id="wDays"></div>
+    </section>
+
+    <section class="card widget media idle" id="media" data-widget="media" data-title="Music">
+      <div class="viz" id="viz" aria-hidden="true"></div>
+      <div class="art" id="art">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      </div>
+      <div class="meta">
+        <div class="mtitle" id="mtitle">Nothing playing</div>
+        <div class="martist" id="martist">Play something in Spotify</div>
+      </div>
+      <div class="controls">
+        <button class="ctl" data-media="prev" aria-label="Previous">
+          <svg viewBox="0 0 24 24"><path d="M6 5v14M19 5 9 12l10 7V5Z"/></svg>
+        </button>
+        <button class="ctl main" data-media="playpause" aria-label="Play or pause">
+          <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5-13-7.5Z"/></svg>
+          <svg class="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg>
+        </button>
+        <button class="ctl" data-media="next" aria-label="Next">
+          <svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7V5Z"/></svg>
+        </button>
+      </div>
+    </section>
+
+    <section class="card widget markets" data-widget="markets" data-title="Markets">
+      <h3>Markets <span class="sub" id="mkUpdated"></span></h3>
+      <div class="quotes" id="quotes"><div class="loading">Loading prices…</div></div>
+    </section>
+
+    <section class="card widget stats" data-widget="system" data-title="System">
+      <h3>System</h3>
+      <div class="stat"><span class="k">CPU</span><div class="bar"><i id="cpuBar"></i></div><span class="v" id="cpuVal">–</span></div>
+      <div class="stat"><span class="k">RAM</span><div class="bar"><i id="ramBar"></i></div><span class="v" id="ramVal">–</span></div>
+      <div class="stat"><span class="k">GPU</span><div class="bar"><i id="gpuBar"></i></div><span class="v" id="gpuVal">–</span></div>
+      <div class="stat"><span class="k">VRAM</span><div class="bar"><i id="vramBar"></i></div><span class="v" id="vramVal">–</span></div>
+    </section>
+
+    <section class="card widget stats" data-widget="storage" data-title="Storage">
+      <h3>Storage</h3>
+      <div id="disks"></div>
+    </section>
+
+    <section class="card widget calendar" data-widget="calendar" data-title="Calendar">
+      <header class="cal-head">
+        <div class="cal-title" id="calTitle"></div>
+        <div class="cal-nav">
+          <button class="cal-btn" id="calPrev" aria-label="Previous month"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+          <button class="cal-btn today-btn" id="calToday">Today</button>
+          <button class="cal-btn" id="calNext" aria-label="Next month"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+        </div>
+      </header>
+      <div class="cal-dow" id="calDow"></div>
+      <div class="cal-grid" id="calGrid"></div>
+      <div class="cal-list">
+        <div class="cal-list-head" id="calListHead">Up next</div>
+        <div class="cal-events" id="calEvents"></div>
+        <button class="pill add google-reconnect" hidden>Reconnect Google</button>
+      </div>
+    </section>
+
+    <section class="card widget todo" data-widget="todo" data-title="To-do">
+      <h3>To-do <span class="sub" id="todoCount"></span></h3>
+      <div class="todo-list" id="todoList"></div>
+      <div class="todo-actions">
+        <button class="pill add" id="todoAdd">+ Add task</button>
+        <button class="pill" id="todoClear" hidden>Clear done</button>
+        <button class="pill add google-reconnect" hidden>Reconnect Google</button>
+      </div>
+    </section>
+    <section class="card widget chat" data-widget="chat" data-title="AI chat">
+      <h3>Assistant <span class="sub" id="chatModel">Private · on this PC</span></h3>
+      <div class="chat-log" id="chatLog"></div>
+      <div class="chat-error" id="chatError" hidden></div>
+      <div class="todo-actions">
+        <button class="pill add" id="chatAsk">Ask something…</button>
+        <button class="pill" id="chatStop" hidden>Stop</button>
+        <button class="pill" id="chatClear" hidden>New chat</button>
+      </div>
+    </section>
+  </div>
+
+  <nav class="dock" id="dock"></nav>
+
+  <div class="overlay" id="folder" hidden>
+    <div class="folder-panel">
+      <header>
+        <h2 id="ftitle"></h2>
+        <button class="pill" id="fopen">Open in Explorer</button>
+      </header>
+      <div class="folder-grid" id="fgrid"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
