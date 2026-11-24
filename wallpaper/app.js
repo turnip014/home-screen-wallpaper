@@ -968,16 +968,82 @@
   // commands that change or remove things get a red warning before you click Run
   const RISKY = /\b(remove-item|rm|rmdir|del|erase|rd|format|diskpart|reg\s+delete|remove-itemproperty|set-itemproperty|stop-process|kill|taskkill|shutdown|restart-computer|stop-computer|uninstall|clear-content|set-content|out-file|move-item|rename-item|bcdedit|cipher|takeown|icacls)\b/i;
 
+  const REC_STATE = {};  // id -> status after a button click (the chat log keeps the original)
+  const REC_DONE = { saved: "♥ Saved to Liked Songs", liked: "👍 Liked", disliked: "👎 Disliked", playing: "▶ Playing", queued: "+ Queued" };
+  async function recAction(r, action, card) {
+    if (S.editing) return;
+    card.classList.add("working");
+    try {
+      const res = await api("/dj/act", { action, id: r.id });
+      if (res.ok) REC_STATE[r.id] = { play: "playing", queue: "queued", save: "saved", like: "liked", dislike: "disliked" }[action];
+      else REC_STATE[r.id + ":err"] = res.error;
+      if (res.dj) renderDJ(res.dj);
+    } catch { REC_STATE[r.id + ":err"] = "Helper offline"; }
+    card.classList.remove("working");
+    paintRec(r, card);
+  }
+  function paintRec(r, card) {
+    const st = REC_STATE[r.id] || r.status;
+    card.dataset.state = st;
+    card.querySelector(".rec-state").textContent = REC_STATE[r.id + ":err"] || REC_DONE[st] || "";
+    card.querySelectorAll("button").forEach((b) => b.classList.toggle("on",
+      (b.dataset.a === "save" && st === "saved") || (b.dataset.a === "like" && st === "liked") || (b.dataset.a === "dislike" && st === "disliked")));
+  }
+  function recCards(a) {
+    const box = document.createElement("div");
+    box.className = "recs";
+    for (const r of a.recs || []) {
+      const card = document.createElement("div");
+      card.className = "rec";
+      card.innerHTML = `<div class="rec-t"><b></b><span></span></div><div class="rec-why"></div>
+        <div class="rec-btns"><button class="pill add" data-a="play">▶ Play</button><button class="pill" data-a="queue">+ Queue</button>
+        <button class="pill" data-a="save" title="Save to Liked Songs">♥</button><button class="pill" data-a="like" title="Like">👍</button>
+        <button class="pill" data-a="dislike" title="Dislike">👎</button></div><div class="rec-state"></div>`;
+      card.querySelector("b").textContent = r.title;
+      card.querySelector(".rec-t span").textContent = ` · ${r.artist}`;
+      card.querySelector(".rec-why").textContent = r.why || "";
+      card.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => recAction(r, b.dataset.a, card)));
+      paintRec(r, card);
+      box.append(card);
+    }
+    return box;
+  }
+
   function actionCard(a) {
+    if (a.name === "recommend_songs" && a.recs && a.recs.length) return recCards(a);
     const card = document.createElement("div");
     card.className = `action ${a.status}`;
     const head = document.createElement("div");
     head.className = "action-head";
     const isCmd = a.name === "run_command";
-    const title = isCmd ? (a.auto ? "PowerShell · read-only, ran automatically" : "Run in PowerShell") : "Open Claude Code";
-    head.textContent = title;
-    card.append(head);
     const args = a.args || {};
+    const KIND = {
+      recommend_songs: { title: "Looking up songs on Spotify", body: (args.songs || []).map((s) => `• ${s.title} – ${s.artist}`).join("\n"), yes: "", no: "" },
+      dj_control: { title: `DJ Rora · ${{ auto_on: "auto mode on", auto_off: "auto mode off", skip: "skipped", like: "liked", dislike: "disliked", save: "saved",
+        steer: /^(normal|back to normal|reset|clear)$/i.test(args.request || "") ? "back to normal" : `steered: ${args.request || ""}` }[args.action] || args.action}`, body: "", yes: "", no: "" },
+      desktop_info: { title: "Looked at your home screen", body: `Topic: ${args.topic || "overview"}`, yes: "", no: "" },
+      web_search: { title: a.fallback ? "Not sure from memory · search the web?" : "Search the web", body: args.query || "", yes: "Allow", no: "Don't allow", net: true },
+      read_webpage: { title: "Open a web page", body: args.url || "", yes: "Allow", no: "Don't allow", net: true },
+      ask_claude: { title: "Ask Claude (Claude Code)", body: `${args.question || ""}${args.folder ? `\n\nFolder: ${args.folder}` : ""}`, yes: "Ask Claude", no: "Don't ask", net: true },
+      spotify_playlist: {
+        title: "Create a Spotify playlist",
+        body: `${args.name || "New playlist"}\n${args.source === "songs" || !args.source
+          ? (args.songs || []).map((s) => `• ${s.title} – ${s.artist}`).join("\n")
+          : { my_top_week: "Your most played songs this week", my_top_month: "Your most played songs this month",
+              my_top_all_time: "Your all-time most played", on_repeat: "Songs you've had on repeat",
+              spotify_top_4_weeks: "Spotify's top tracks for you (4 weeks)", spotify_top_6_months: "Spotify's top tracks for you (6 months)",
+              spotify_top_all_time: "Spotify's all-time top tracks for you" }[args.source] || args.source}${args.limit ? ` · up to ${args.limit} songs` : ""}`,
+        yes: "Create", no: "Don't create", net: true },
+      add_calendar_event: {
+        title: "Add to Google Calendar",
+        body: `${args.title || "New event"}\n${(() => { const d = new Date(`${args.date}T00:00`); return isNaN(d) ? args.date || "" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }); })()}${args.start_time ? ` · ${args.start_time}${args.end_time ? `–${args.end_time}` : args.duration_minutes ? ` (${args.duration_minutes} min)` : ""}` : " · all day"}${args.end_date ? ` → ${args.end_date}` : ""}${args.repeat && args.repeat !== "none"
+          ? `\n↻ ${{ daily: "Every day", weekdays: "Every weekday (Mon–Fri)", weekly: "Every week", monthly: "Every month" }[args.repeat] || args.repeat} until ${args.repeat_until || "?"}${args.skip_holidays === false ? "" : " · skips public holidays"}` : ""}${args.tentative ? "\nTentative (to be confirmed)" : ""}${args.location ? `\n📍 ${args.location}` : ""}${args.notes ? `\n${args.notes}` : ""}`,
+        yes: "Add", no: "Don't add", net: true },
+      open_claude_code: { title: "Open Claude Code", body: `Folder: ${args.folder || "home folder"}${args.prompt ? `\nPrompt: ${args.prompt}` : ""}`, yes: "Open", no: "Cancel" },
+    }[a.name] || { title: isCmd ? (a.auto ? "PowerShell · read-only, ran automatically" : "Run in PowerShell") : a.name, body: args.command || "", yes: "Run", no: "Don't run" };
+    if (["desktop_info", "dj_control", "recommend_songs"].includes(a.name)) card.classList.add("quiet");
+    head.textContent = KIND.title;
+    card.append(head);
     if (isCmd && args.reason) {
       const why = document.createElement("div");
       why.className = "action-why";
@@ -986,10 +1052,16 @@
     }
     const pre = document.createElement("pre");
     const code = document.createElement("code");
-    code.textContent = isCmd ? args.command || "" :
-      `Folder: ${args.folder || "home folder"}${args.prompt ? `\nPrompt: ${args.prompt}` : ""}`;
+    code.textContent = KIND.body;
     pre.append(code);
-    card.append(pre);
+    if (!["desktop_info", "dj_control"].includes(a.name)) card.append(pre);
+    if (a.status === "pending" && KIND.net) {
+      const note = document.createElement("div");
+      note.className = "action-net";
+      note.textContent = a.name === "ask_claude" ? "🌐 This question is sent to Anthropic's servers."
+        : a.name === "spotify_playlist" ? "🎵 This adds a new playlist to your Spotify account." : "🌐 This goes out to the internet.";
+      card.append(note);
+    }
     if (a.status === "pending") {
       if (isCmd && RISKY.test(args.command || "")) {
         const warn = document.createElement("div");
@@ -1001,10 +1073,10 @@
       row.className = "action-btns";
       const run = document.createElement("button");
       run.className = "pill add";
-      run.textContent = isCmd ? "Run" : "Open";
+      run.textContent = KIND.yes;
       const no = document.createElement("button");
       no.className = "pill";
-      no.textContent = isCmd ? "Don't run" : "Cancel";
+      no.textContent = KIND.no;
       run.addEventListener("click", () => { if (!S.editing) { row.remove(); chatAction("decide", { id: a.id, approve: true }); } });
       no.addEventListener("click", () => { if (!S.editing) { row.remove(); chatAction("decide", { id: a.id, approve: false }); } });
       row.append(run, no);
@@ -1012,7 +1084,9 @@
     } else {
       const status = document.createElement("div");
       status.className = "action-status";
-      status.textContent = { running: "Running…", done: "✓ Done", error: `✕ Failed${a.exit != null && a.exit !== -1 ? ` (exit ${a.exit})` : ""}`, declined: "Not run" }[a.status] || a.status;
+      const doneText = { spotify_playlist: "✓ Playlist created", web_search: "✓ Searched", read_webpage: "✓ Read the page", ask_claude: "✓ Claude answered", desktop_info: "✓" }[a.name] || "✓ Done";
+      const runText = { spotify_playlist: "Making the playlist…", web_search: "Searching…", read_webpage: "Reading…", ask_claude: "Waiting for Claude…", desktop_info: "Looking…" }[a.name] || "Running…";
+      status.textContent = { running: runText, done: doneText, error: `✕ Failed${a.exit != null && a.exit !== -1 ? ` (exit ${a.exit})` : ""}`, declined: KIND.net ? "Not allowed" : "Not run" }[a.status] || a.status;
       card.append(status);
       if (a.output && a.status !== "declined" && (isCmd || a.status === "error")) {
         const out = document.createElement("pre");
@@ -1056,7 +1130,8 @@
           el.innerHTML = '<span class="typing-dots"><i></i><i></i><i></i></span>' +
             (st.thinking ? '<span class="thinking">Thinking…</span>' : "");
         }
-        else el.innerHTML = m.role === "user" ? esc(m.content).replace(/\n/g, "<br>") : md(m.content);
+        else el.innerHTML = m.role === "user" ? esc(m.content).replace(/\n/g, "<br>")
+          : md(m.content.replace(/<(function|tool)[-_]call>[\s\S]*?(<\/(function|tool)[-_]call>|$)/g, "").trim()) || "…";
         acts.forEach((a) => el.append(actionCard(a)));
         el.classList.toggle("has-actions", acts.length > 0);
       }
@@ -1066,11 +1141,50 @@
     if (nearBottom || st.busy) log.scrollTop = log.scrollHeight;
     $("chatStop").hidden = !st.busy;
     $("chatClear").hidden = st.busy || !msgs.length;
-    $("chatAsk").textContent = msgs.length ? "Reply…" : "Ask something…";
+    $("chatAsk").textContent = msgs.length ? "Reply to Rora…" : "Ask Rora…";
     $("chatModel").textContent = `${st.model} · on this PC`;
+    renderBoot(st);
     const err = $("chatError");
     err.hidden = !st.error;
     err.textContent = st.error ? `⚠ ${st.error}` : "";
+  }
+
+  // boot animation while Ollama starts and the model loads into the GPU (a cold start takes ~half a minute)
+  const BOOT = { phase: null, t0: 0, est: 45, timer: 0 };
+  function renderBoot(st) {
+    const box = $("chatBoot");
+    if (st.phase) {
+      if (!BOOT.phase) { box.hidden = false; box.classList.remove("leaving"); }
+      BOOT.t0 = Date.now() - (st.phaseFor || 0) * 1000;
+      BOOT.est = Math.max(5, st.loadSecs || 45);
+      BOOT.phase = st.phase;
+      clearInterval(BOOT.timer);
+      BOOT.timer = setInterval(tickBoot, 200);
+      tickBoot();
+    } else if (BOOT.phase) {
+      BOOT.phase = null;
+      clearInterval(BOOT.timer);
+      $("bootBar").style.width = "100%";
+      $("bootStep").textContent = "Ready ✓";
+      box.classList.add("leaving");
+      setTimeout(() => { if (!BOOT.phase) { box.hidden = true; box.classList.remove("leaving"); } }, 900);
+    }
+  }
+  function tickBoot() {
+    if (!BOOT.phase) return;
+    const secs = (Date.now() - BOOT.t0) / 1000;
+    let p, step;
+    if (BOOT.phase === "starting") {
+      p = Math.min(0.12, secs / 80);
+      step = secs < 3 ? "Starting the AI engine…" : "Finding the graphics card…";
+    } else {
+      const f = 1 - Math.exp((-2.2 * secs) / BOOT.est); // eases toward 100% around the usual load time
+      p = 0.12 + 0.86 * f;
+      const steps = ["Reading the model from disk…", "Moving the model into GPU memory…", "Warming up the neural network…", "Almost there…"];
+      step = steps[Math.min(steps.length - 1, Math.floor((secs / BOOT.est) * steps.length))];
+    }
+    $("bootBar").style.width = `${(p * 100).toFixed(1)}%`;
+    $("bootStep").textContent = step;
   }
 
   async function refreshChat() {
@@ -1112,6 +1226,362 @@
     todoAction("clear", {}, 280);
   });
 
+  // ================================================================ Gmail access (mail + spending need the read-only Gmail permission)
+  const GM = { mail: "", spending: "" };
+  function renderGrant() {
+    const need = GM.mail === "needs-gmail" || GM.spending === "needs-gmail";
+    document.querySelectorAll(".google-grant").forEach((b) => { b.hidden = !need; });
+  }
+  document.querySelectorAll(".google-grant").forEach((b) => b.addEventListener("click", async () => {
+    if (S.editing || !BASE) return;
+    b.textContent = "Opening Google sign-in…";
+    try { await api("/google/connect", {}); } catch { setOnline(false); }
+    setTimeout(() => { b.textContent = "Allow Gmail access"; refreshMail(); refreshSpending(); }, 45000);
+  }));
+
+  const ago = (ts) => {
+    const d = new Date(ts * 1000), now = new Date();
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    if (now - d < 6 * 86400000) return d.toLocaleDateString(undefined, { weekday: "short" });
+    return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  };
+
+  // ================================================================ mail
+  function renderMail(data) {
+    const list = $("mailList");
+    list.textContent = "";
+    GM.mail = data.state;
+    renderGrant();
+    if (data.state !== "ok") {
+      $("mailCount").textContent = "";
+      const p = document.createElement("div");
+      p.className = "cal-empty";
+      p.textContent = data.state === "needs-gmail"
+        ? "Give the home screen read-only access to Gmail to see your inbox here. Nothing is sent or changed."
+        : "Connect Google to see your inbox here.";
+      list.append(p);
+      return;
+    }
+    $("mailCount").textContent = data.unread ? `${data.unread} unread` : "All read";
+    if (!data.messages.length) {
+      const p = document.createElement("div");
+      p.className = "cal-empty";
+      p.textContent = "Inbox zero. 🎉";
+      list.append(p);
+    }
+    for (const m of data.messages) {
+      const row = document.createElement("button");
+      row.className = "mail-item" + (m.unread ? " unread" : "");
+      row.innerHTML = `<span class="dot"></span><span class="from"></span><span class="when"></span><span class="subj"></span><span class="snip"></span>`;
+      row.querySelector(".from").textContent = m.from;
+      row.querySelector(".when").textContent = ago(m.time);
+      row.querySelector(".subj").textContent = m.subject;
+      row.querySelector(".snip").textContent = m.snippet;
+      row.addEventListener("click", () => { if (!S.editing) api("/mail/open", { thread: m.thread }).catch(() => {}); });
+      list.append(row);
+    }
+  }
+
+  // ---- top songs: listening history from Spotify, counted on this PC by the helper
+  const TOP = { days: 7 };
+  function fmtMins(m) { return m >= 90 ? `${Math.round(m / 6) / 10} h` : `${Math.round(m)} min`; }
+  function renderTop(d) {
+    const list = $("tsList");
+    list.textContent = "";
+    const label = { 7: "this week", 30: "this month" }[TOP.days] || "all time";
+    $("tsSub").textContent = d.plays ? `${fmtMins(d.minutes)} ${label}` : "";
+    const rep = new Set((d.onRepeat || []).map((s) => `${s.title}\u241f${s.artist}`));
+    const sp = d.spotify || {};
+    let songs = d.songs;
+    if (!songs.length && sp.top && sp.top.length) {  // no local history for this range yet: show Spotify's list
+      songs = sp.top.map((s) => ({ ...s, plays: 0 }));
+      $("tsSub").textContent = `from Spotify · ${sp.label}`;
+    }
+    renderTopActions(d, songs.length > 0);
+    if (!songs.length) {
+      const p = document.createElement("div");
+      p.className = "cal-empty";
+      p.textContent = d.since ? `Nothing played ${label} yet.`
+        : "Rora is learning what you like: songs you listen to for 30 seconds or more in Spotify will show up here.";
+      list.append(p);
+    }
+    songs.slice(0, 5).forEach((s, i) => {
+      const row = document.createElement("div");
+      row.className = "ts-item";
+      row.innerHTML = `<span class="n"></span><span class="line"><span class="t"></span><span class="a"></span></span><span class="c"></span>`;
+      row.querySelector(".n").textContent = i + 1;
+      row.querySelector(".t").textContent = s.title;
+      row.querySelector(".a").textContent = ` · ${s.artist}`;
+      if (rep.has(`${s.title}\u241f${s.artist}`)) row.querySelector(".c").classList.add("rep");
+      row.querySelector(".c").textContent = s.plays ? `${s.plays}×` : "";
+      row.title = `${s.title} by ${s.artist}: ${s.plays} plays, ${fmtMins(s.mins)}`;
+      list.append(row);
+    });
+    const ar = $("tsArtists");
+    ar.textContent = "";
+    for (const a of (d.artists || []).slice(0, 4)) {
+      const chip = document.createElement("span");
+      chip.className = "ts-chip";
+      chip.textContent = `${a.artist} · ${a.plays}`;
+      ar.append(chip);
+    }
+  }
+  function renderTopActions(d, hasSongs) {
+    const st = (d.spotify || {}).state, job = d.playlistJob || {};
+    const connect = $("tsConnect"), save = $("tsSave"), note = $("tsNote");
+    connect.hidden = !(st === "off" || st === "expired");
+    if (st === "ok" && DJS.data && !DJS.data.ready) { connect.hidden = false; connect.textContent = "Reconnect Spotify"; }
+    connect.textContent = st === "expired" ? "Reconnect Spotify" : "Connect Spotify";
+    save.hidden = st !== "ok" || !hasSongs;
+    save.disabled = !!job.busy;
+    save.textContent = job.busy ? "Making playlist…" : "Save as playlist";
+    note.textContent = "";
+    note.onclick = null;
+    note.classList.remove("link");
+    if (job.result && Date.now() / 1000 - job.at < 15 * 60) {
+      note.textContent = `✓ Saved “${job.result.name}” (${job.result.added.length} songs)`;
+      if (job.result.id) {
+        note.classList.add("link");
+        note.onclick = () => { if (!S.editing) api("/spotify/open", { id: job.result.id }).catch(() => {}); };
+      }
+    } else if (job.error && Date.now() / 1000 - job.at < 15 * 60) {
+      note.textContent = `Couldn't save: ${job.error}`;
+    }
+    if (job.busy) setTimeout(refreshTop, 2000);
+  }
+  $("tsConnect").addEventListener("click", () => { if (!S.editing) api("/spotify/connect", {}).catch(() => {}); });
+  $("tsSave").addEventListener("click", async () => {
+    if (S.editing) return;
+    $("tsSave").disabled = true;
+    try { await api("/spotify/playlist", { days: TOP.days }); } catch { /* offline */ }
+    refreshTop();
+  });
+
+  // ---- DJ Rora strip (Music widget)
+  const DJS = { data: null };
+  function renderDJ(d) {
+    DJS.data = d;
+    const box = $("dj"), info = $("djInfo"), auto = $("djAuto");
+    box.hidden = d.state === "setup" || d.state === "off";
+    box.classList.toggle("auto", !!d.auto);
+    auto.setAttribute("aria-pressed", d.auto ? "true" : "false");
+    auto.textContent = d.ready ? (d.auto ? "Auto ●" : "Auto") : "Reconnect";
+    let text;
+    if (!d.ready) text = "Reconnect Spotify so Rora can queue and save songs";
+    else if (d.error) text = d.error;
+    else if (d.busy && !d.current) text = d.game ? `Picking songs for ${d.game}…` : "Picking songs for you…";
+    else if (d.current) text = `${d.game ? `🎮 ${d.game} · ` : ""}${d.current.why || d.mood || "Rora's pick"}`;
+    else if (d.game) text = `🎮 ${d.game}${d.auto ? " · playing picks that fit" : " · turn on Auto for matching music"}`;
+    else text = d.auto ? `Auto: picks keep coming${d.mood ? ` · ${d.mood}` : ""}` : "Turn on Auto and Rora keeps the music going";
+    info.textContent = text;
+    info.title = text;
+    const req = $("djReq");
+    req.hidden = !d.request;
+    req.textContent = d.request ? `🎧 ${d.request} ✕` : "";
+    req.title = d.request ? "Steered from chat. Click to go back to the normal mix." : "";
+    const now = d.now;
+    $("djBtns").hidden = !d.ready || !now;
+    $("djSave").classList.toggle("on", !!(now && now.saved));
+    $("djLike").classList.toggle("on", !!(now && now.feedback > 0 && !now.saved));
+    $("djSkip").classList.toggle("on", !!(now && now.feedback < 0));
+  }
+  async function refreshDJ() {
+    if (!BASE || !visible("media")) return;
+    try { renderDJ(await api("/dj")); } catch { /* helper offline */ }
+  }
+  $("djReq").addEventListener("click", async () => {
+    if (S.editing) return;
+    try { renderDJ(await api("/dj/steer", { request: "" })); } catch { /* offline */ }
+  });
+  $("djAuto").addEventListener("click", async () => {
+    if (S.editing || !DJS.data) return;
+    if (!DJS.data.ready) { api("/spotify/connect", {}).catch(() => {}); return; }
+    try { renderDJ(await api("/dj/auto", { on: !DJS.data.auto })); } catch { /* offline */ }
+  });
+  [["djSave", "save"], ["djLike", "like"], ["djSkip", "dislike"]].forEach(([id, action]) =>
+    $(id).addEventListener("click", async () => {
+      if (S.editing) return;
+      $(id).classList.add("working");
+      try { const res = await api("/dj/act", { action }); if (res.dj) renderDJ(res.dj); } catch { /* offline */ }
+      $(id).classList.remove("working");
+    }));
+
+  async function refreshTop() {
+    if (!BASE || !visible("topsongs")) return;
+    try { renderTop(await api(`/music?days=${TOP.days}`)); } catch { /* helper offline */ }
+  }
+  document.querySelectorAll(".ts-tab").forEach((b) => b.addEventListener("click", () => {
+    if (S.editing) return;
+    document.querySelectorAll(".ts-tab").forEach((x) => x.classList.toggle("on", x === b));
+    TOP.days = +b.dataset.days;
+    refreshTop();
+  }));
+
+  async function refreshMail() {
+    clearTimeout(S.timers.mailRetry);
+    if (!BASE || !visible("mail")) return;
+    try {
+      const res = await api("/mail");
+      if (res.data) renderMail(res.data);
+      if (!res.data || res.refreshing) S.timers.mailRetry = setTimeout(refreshMail, res.data ? 6000 : 3000);
+    } catch { S.timers.mailRetry = setTimeout(refreshMail, 15000); }
+  }
+  $("mailOpen").addEventListener("click", () => { if (!S.editing) api("/mail/open", { thread: "inbox" }).catch(() => {}); });
+
+  // ================================================================ spending (card alert emails, parsed on this PC)
+  const money = (v, c) => { try { return Number(v).toLocaleString(undefined, { style: "currency", currency: c || "USD" }); } catch { return `${c} ${Number(v).toFixed(2)}`; } };
+
+  function renderSpending(d) {
+    const body = $("spBody");
+    body.textContent = "";
+    GM.spending = d.state;
+    renderGrant();
+    if (d.state !== "ok") {
+      $("spCard").textContent = "";
+      body.innerHTML = `<div class="cal-empty">${d.state === "needs-gmail"
+        ? "Reads your card alert emails (read-only) and adds them up on this PC."
+        : "Connect Google so your card alert emails can be read."}</div>`;
+      return;
+    }
+    $("spCard").textContent = d.card ? `card ·· ${d.card}` : d.cards.length > 1 ? `${d.cards.length} cards` : "";
+    renderDues(d, body);
+    const head = document.createElement("div");
+    head.className = "sp-head";
+    const diff = d.month - d.prevSamePoint;
+    head.innerHTML = `<div class="sp-total"></div><div class="sp-vs"></div>`;
+    head.querySelector(".sp-total").textContent = money(d.month, d.currency);
+    const vs = head.querySelector(".sp-vs");
+    vs.textContent = d.prevSamePoint || d.prevMonth
+      ? `${diff >= 0 ? "▲" : "▼"} ${money(Math.abs(diff), d.currency)} vs same point last month`
+      : `${d.count} purchase${d.count === 1 ? "" : "s"} this month`;
+    vs.classList.toggle("up", diff > 0);
+    body.append(head);
+    if (d.budget) {
+      const pct = Math.min(100, (100 * d.month) / d.budget);
+      const b = document.createElement("div");
+      b.className = "sp-budget" + (pct >= 100 ? " over" : pct > 80 ? " warn" : "");
+      b.innerHTML = `<div class="bar"><i style="width:${pct}%"></i></div><span>${Math.round((100 * d.month) / d.budget)}% of ${money(d.budget, d.currency)}</span>`;
+      body.append(b);
+    }
+    // a small bar per day of the month so far
+    const max = Math.max(1, ...d.daily);
+    const days = document.createElement("div");
+    days.className = "sp-days";
+    d.daily.forEach((v, i) => {
+      const bar = document.createElement("i");
+      bar.style.height = `${v ? Math.max(6, (100 * v) / max) : 3}%`;
+      bar.title = `${i + 1}: ${money(v, d.currency)}`;
+      if (i === d.daily.length - 1) bar.className = "today";
+      days.append(bar);
+    });
+    body.append(days);
+    const cats = d.categories || [];
+    if (cats.length) {
+      const box = document.createElement("div");
+      box.className = "sp-cats";
+      const top = Math.max(...cats.map((c) => c.total), 1);
+      for (const c of cats.slice(0, 5)) {
+        const row = document.createElement("div");
+        row.className = "sp-cat";
+        row.title = `${c.count} purchase${c.count === 1 ? "" : "s"}`;
+        row.innerHTML = `<span class="i"></span><span class="n"></span><span class="a"></span><div class="bar"><i></i></div>`;
+        row.querySelector(".i").textContent = c.icon;
+        row.querySelector(".n").textContent = c.name;
+        row.querySelector(".a").textContent = money(c.total, d.currency);
+        row.querySelector("i").style.width = `${Math.max(2, (100 * c.total) / top)}%`;
+        box.append(row);
+      }
+      body.append(box);
+    }
+    const list = document.createElement("div");
+    list.className = "sp-list";
+    for (const t of d.recent.slice(0, 2)) {
+      const row = document.createElement("div");
+      row.className = "sp-item";
+      row.innerHTML = `<span class="m"></span><span class="w"></span><span class="a"></span>`;
+      row.querySelector(".m").textContent = `${t.icon || ""} ${t.merchant}`.trim();
+      row.title = t.cat || "";
+      row.querySelector(".w").textContent = ago(t.t);
+      row.querySelector(".a").textContent = money(t.amount, t.currency);
+      list.append(row);
+    }
+    if (!d.recent.length) {
+      const since = new Date(d.since * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      list.innerHTML = `<div class="cal-empty">Tracking since ${since}. New card purchases show up here within about 10 minutes.</div>`;
+    }
+    body.append(list);
+  }
+
+  function renderDues(d, body) {
+    const show = (d.dues || []).filter((x) => !x.paid || Date.now() / 1000 - x.paid < 3 * 86400).slice(-2);
+    for (const x of show) {
+      const box = document.createElement("div");
+      box.className = `sp-due ${x.state}`;
+      const dueDate = new Date(`${x.due}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      const label = { overdue: `Overdue since ${dueDate}`, due: "Pay off today", upcoming: `Pay by ${dueDate}`, paid: "Paid off ✓" }[x.state];
+      box.innerHTML = `<div class="t"><b></b><span></span></div><button class="pill"></button>`;
+      box.querySelector("b").textContent = `${x.name.split(" ")[0]} dues · ${money(x.amount, d.currency)}`;
+      box.querySelector("span").textContent = label;
+      const btn = box.querySelector("button");
+      btn.textContent = x.paid ? "Undo" : "Mark as paid";
+      if (!x.paid) btn.classList.add("add");
+      btn.addEventListener("click", async () => {
+        if (S.editing) return;
+        btn.disabled = true;
+        try {
+          const res = await api("/spending/paid", { month: x.month, paid: !x.paid });
+          if (res.data) renderSpending(res.data);
+        } catch { btn.disabled = false; }
+      });
+      body.append(box);
+    }
+  }
+
+  async function refreshSpending() {
+    clearTimeout(S.timers.spRetry);
+    if (!BASE || !visible("spending")) return;
+    try {
+      const res = await api("/spending");
+      if (res.data) renderSpending(res.data);
+      if (!res.data || res.refreshing) S.timers.spRetry = setTimeout(refreshSpending, res.data ? 6000 : 3000);
+    } catch { S.timers.spRetry = setTimeout(refreshSpending, 15000); }
+  }
+
+  // ================================================================ move breaks (exercise)
+  const MV = { data: null };
+  function renderMove() {
+    const d = MV.data;
+    if (!d) return;
+    const mins = Math.floor(d.active / 60);
+    $("mvMins").textContent = mins;
+    const frac = Math.min(1, d.active / d.every);
+    const C = 2 * Math.PI * 42;
+    const fill = $("mvFill");
+    fill.style.strokeDasharray = `${C}`;
+    fill.style.strokeDashoffset = `${C * (1 - frac)}`;
+    $("mvRing").classList.toggle("due", frac >= 1);
+    $("mvNext").textContent = `${d.next.amount} ${d.next.name}`;
+    $("mvSub").textContent = !d.enabled ? "Reminders off"
+      : d.prompting ? "Time to move!"
+      : d.gaming ? "Waiting until your game ends"
+      : d.snoozedFor ? `Snoozed · ${Math.ceil(d.snoozedFor / 60)} min`
+      : d.dueIn == null ? "Timer starts when you're back"
+      : d.dueIn === 0 ? "Due now" : `in ${Math.ceil(d.dueIn / 60)} min`;
+    const today = d.today.length;
+    $("mvStats").textContent = `${today} today${d.streak ? ` · 🔥 ${d.streak}-day streak` : ""}`;
+  }
+  async function refreshMove() {
+    if (!BASE || !visible("move")) return;
+    try { MV.data = await api("/exercise"); renderMove(); } catch { /* offline */ }
+  }
+  async function moveAction(a) {
+    if (S.editing || !BASE) return;
+    try { MV.data = await api(`/exercise/${a}`, {}); renderMove(); } catch { setOnline(false); }
+    if (a === "done") $("mvRing").animate([{ transform: "scale(1)" }, { transform: "scale(1.15)" }, { transform: "scale(1)" }], { duration: 500, easing: "cubic-bezier(.2,1.35,.4,1)" });
+  }
+  $("mvDone").addEventListener("click", () => moveAction("done"));
+  $("mvSwap").addEventListener("click", () => moveAction("next"));
+
   // ================================================================ media (Wallpaper Engine)
   function initMedia() {
     const m = $("media");
@@ -1123,8 +1593,13 @@
     }));
 
     if (typeof window.wallpaperRegisterMediaPropertiesListener !== "function") return;
+    // the assistant can answer "what's this song?": tell the helper what's playing (stays on this PC)
+    const NOW = { title: "", artist: "", playing: false };
+    let sendTimer = 0;
+    const share = () => { clearTimeout(sendTimer); sendTimer = setTimeout(() => { if (BASE) api("/context/media", NOW).catch(() => {}); }, 400); };
     window.wallpaperRegisterMediaPropertiesListener((e) => {
       const has = !!e.title;
+      NOW.title = e.title || ""; NOW.artist = e.artist || ""; share();
       $("mtitle").textContent = e.title || "Nothing playing";
       $("martist").textContent = e.artist || (has ? "" : "Play something in Spotify");
       m.classList.toggle("idle", !has);
@@ -1138,6 +1613,7 @@
     window.wallpaperRegisterMediaPlaybackListener((e) => {
       const P = window.wallpaperMediaIntegration || {};
       m.classList.toggle("playing", e.state === (P.PLAYBACK_PLAYING ?? 1));
+      NOW.playing = e.state === (P.PLAYBACK_PLAYING ?? 1); share();
       if (e.state === (P.PLAYBACK_STOPPED ?? 0)) m.classList.add("idle");
     });
   }
@@ -1156,7 +1632,7 @@
   const glow = $("glow");
 
   function kick() {
-    if (M.running || S.paused) return;
+    if (M.running || S.paused || PW.resting) return;
     M.running = true;
     requestAnimationFrame(frame);
   }
@@ -1185,6 +1661,7 @@
   }
 
   window.addEventListener("pointermove", (e) => {
+    if (PW.resting && PW.why === "idle") wake();
     if (!S.interactive) return;
     M.tx = e.clientX / window.innerWidth;
     M.ty = e.clientY / window.innerHeight;
@@ -1223,7 +1700,7 @@
   function initAudio() {
     if (typeof window.wallpaperRegisterAudioListener !== "function") return;
     window.wallpaperRegisterAudioListener((a) => {
-      if (!S.audioReact || S.paused) return;
+      if (!S.audioReact || S.paused || PW.resting) return;
       // a = 128 values: 0-63 left channel, 64-127 right, low to high frequencies
       let total = 0;
       for (let i = 0; i < 128; i++) total += a[i];
@@ -1274,7 +1751,7 @@
 
   // ================================================================ widget layout + edit mode
   const DEFAULT_LAYOUT = {
-    cols: { farleft: ["calendar"], left: ["clock", "weather", "media"], right: ["markets", "system", "storage"], farright: ["todo", "chat"] },
+    cols: { farleft: ["calendar", "mail"], left: ["clock", "weather", "media", "move"], right: ["markets", "spending", "system", "storage"], farright: ["todo", "topsongs", "chat"] },
     hidden: [],
   };
   const COLS = [...document.querySelectorAll(".col")];
@@ -1390,6 +1867,10 @@
     if (id === "system" || id === "storage") refreshStats();
     if (id === "calendar") refreshCalendar();
     if (id === "todo") refreshTodos();
+    if (id === "mail") refreshMail();
+    if (id === "spending") refreshSpending();
+    if (id === "move") refreshMove();
+    if (id === "topsongs") refreshTop();
   }
 
   function enterEdit() {
@@ -1505,6 +1986,59 @@
     });
   }
 
+  // ================================================================ power modes
+  // active:  everything runs.
+  // resting: no keyboard / mouse input anywhere on the PC for a few minutes, or a game is running.
+  //          All animations freeze and the live widgets stop polling, so the page stops drawing
+  //          frames and the GPU can drop to its idle clocks. Only the clock ticks (once a minute).
+  //          Any input wakes it: instantly over the wallpaper, within ~2 s elsewhere.
+  // Per widget: with Spotify closed, the DJ strip checks in once a minute instead of every 4 s
+  // (and the helper stops watching Windows' media controls until Spotify opens again).
+  // Resting for longer (5 min by default) also drops the display to a low refresh rate (the helper
+  // switches it back the instant there's input), so the GPU's memory can clock down too.
+  const PW = { after: 120, hzAfter: 300, resting: false, why: "", spotify: null };
+
+  async function checkPower() {
+    if (!BASE || S.paused || document.hidden) return;
+    let p;
+    try { p = await api("/power"); } catch { return; }
+    if (p.spotify !== PW.spotify) {
+      PW.spotify = p.spotify;
+      document.body.classList.toggle("no-spotify", !p.spotify);
+      if (!PW.resting) { clearInterval(S.timers.dj); S.timers.dj = setInterval(refreshDJ, djEvery()); refreshDJ(); }
+    }
+    const now = Date.now();
+    const busy = S.editing || p.chat_busy || now < CH.fastUntil || now < T.fastUntil || BOOT.phase;
+    const why = p.game ? "game" : (PW.after > 0 && p.idle >= PW.after && !busy ? "idle" : "");
+    if (why && !PW.resting) rest(why);
+    else if (!why && PW.resting) wake();
+    if (PW.resting && PW.why === "idle" && PW.hzAfter > 0 && p.idle >= PW.hzAfter && p.display && !p.display.lowered && !PW.hzAsked) {
+      PW.hzAsked = true; // once per rest (the helper restores the rate itself on input)
+      api("/display/rest", { on: true }).catch(() => {});
+    }
+  }
+  const djEvery = () => (PW.spotify === false ? 60 * 1000 : 4000);
+
+  function rest(why) {
+    PW.resting = true;
+    PW.why = why;
+    document.body.classList.add("resting");
+    resetMotion();
+    vizBars.forEach((b) => { b.style.transform = "scaleY(.04)"; });
+    vizSilent = true;
+    start(); // = stop everything but the clock while resting
+  }
+
+  function wake() {
+    if (!PW.resting) return;
+    PW.resting = false;
+    PW.why = "";
+    PW.hzAsked = false;
+    document.body.classList.remove("resting");
+    if (!S.paused && !document.hidden) start();
+  }
+  setInterval(checkPower, 2000);
+
   // ================================================================ Wallpaper Engine settings + pausing
   const toRgb = (v) => {
     const [r, g, b] = String(v).split(" ").map(Number);
@@ -1528,6 +2062,8 @@
         if (S.rendered) renderGrid();
       }
       if (p.columns) { S.columns = Number(p.columns.value); if (S.rendered) renderGrid(); }
+      if (p.idlerest) { PW.after = Number(p.idlerest.value) * 60; if (PW.after <= 0) wake(); }
+      if (p.idlehz) PW.hzAfter = Number(p.idlehz.value) * 60;
     },
     setPaused(paused) { S.paused = paused; paused ? stop() : start(); },
   };
@@ -1535,6 +2071,7 @@
   function start() {
     stop();
     scheduleClock();
+    if (PW.resting) return;
     refreshItems();
     refreshStats();
     refreshWeather();
@@ -1542,6 +2079,16 @@
     refreshCalendar();
     refreshTodos();
     refreshChat();
+    refreshMail();
+    refreshSpending();
+    refreshMove();
+    refreshTop();
+    refreshDJ();
+    S.timers.top = setInterval(refreshTop, 60 * 1000);
+    S.timers.dj = setInterval(refreshDJ, djEvery());
+    S.timers.mail = setInterval(refreshMail, 2 * 60 * 1000);
+    S.timers.spending = setInterval(refreshSpending, 60 * 1000);
+    S.timers.move = setInterval(refreshMove, 15 * 1000);
     S.timers.items = setInterval(refreshItems, 4000);
     S.timers.stats = setInterval(refreshStats, 3000);
     S.timers.weather = setInterval(refreshWeather, 5 * 60 * 1000);
@@ -1558,7 +2105,9 @@
     clearTimeout(S.timers.wxRetry);
     clearTimeout(S.timers.mkRetry);
     clearTimeout(S.timers.calRetry);
-    ["items", "stats", "weather", "markets", "calendar", "todos", "chat"].forEach((k) => clearInterval(S.timers[k]));
+    clearTimeout(S.timers.mailRetry);
+    clearTimeout(S.timers.spRetry);
+    ["items", "stats", "weather", "markets", "calendar", "todos", "chat", "mail", "spending", "move", "top", "dj"].forEach((k) => clearInterval(S.timers[k]));
   }
 
   document.addEventListener("visibilitychange", () => {

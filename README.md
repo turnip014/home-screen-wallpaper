@@ -5,7 +5,7 @@ A phone-style, interactive home screen for the Windows desktop, built as a
 Designed for 32:9 super-ultrawide monitors (7680×2160), and it adapts to any screen size.
 
 Your desktop shortcuts become an animated app grid with a dock and widgets: weather,
-music, markets, system stats, calendar, to-do list and a private on-device AI assistant.
+music, markets, system stats, calendar, to-do list and a private on-device AI assistant named Rora (short for Aurora).
 It's built so it never costs gaming performance.
 
 ## Features
@@ -25,11 +25,31 @@ It's built so it never costs gaming performance.
   - Calendar: month view and upcoming events, from Google Calendar or any iCal feed
     (handles recurring events, exceptions and time zones)
   - To-do list: two-way sync with Google Tasks, or stored locally
-  - AI chat: runs a local LLM through [Ollama](https://ollama.com), so nothing leaves the PC.
-    It can propose PowerShell commands or open Claude Code, and **nothing runs until you click
-    Run**. Destructive commands are flagged.
+  - Mail: latest inbox messages and unread count (Gmail, read-only); click to open in the browser
+  - Spending: card spending this month, parsed locally from bank transaction-alert emails
+    (daily bars, budget, comparison with the same point last month)
+  - Move: a sitting timer. After an hour at the desk, a small corner card suggests a quick
+    exercise (push-ups, squats, plank…). It never takes focus, waits while a full-screen game runs,
+    and keeps a daily streak.
+  - AI chat: runs a local LLM through [Ollama](https://ollama.com), so the conversation stays on
+    the PC. It **sees what the home screen sees** (calendar, tasks, music, weather, markets, PC
+    stats, recently used apps, inbox headers, spending) through a local, read-only tool.
+    Anything that leaves the PC (web search, reading a page, asking Claude via Claude Code) or
+    changes it (non-read-only PowerShell) shows an **Allow / Run button first**.
+    A boot animation plays while the model loads into the GPU, and the model starts warming up
+    as soon as you open the input box.
 - **Motion:** parallax background, cursor glow, click ripples, 3D icon tilt, dock
   magnification and FLIP layout animations. Everything animates only transforms and opacity, with no blur.
+- **Rest mode:** with no keyboard or mouse input for a while (Wallpaper Engine setting, 2 minutes by
+  default) or while a game is running, every animation freezes and the live widgets stop polling. The
+  page then draws no frames and the GPU can drop to idle clocks. Any input wakes it. While Spotify is
+  closed, the music monitor and DJ go quiet, and the DJ only runs the local model while music plays.
+- **Low refresh when idle:** after a longer idle (5 minutes by default) the helper drops the display to
+  a low refresh rate (120 Hz if offered, else 60 Hz) so VRAM can clock down too. Any input restores the
+  normal rate in under half a second. The change is never saved, so a reboot always comes back at the
+  normal rate. It never touches the display while a game or fullscreen app runs.
+  `tools/edid_120hz.ps1` adds a 120 Hz mode through a Windows EDID override, for monitors that only
+  offer 60 and 240 Hz at native resolution (`-Remove` undoes it). The GPU driver must restart once.
 - **Static fallbacks:** a dithered native-resolution render of the background for the Windows
   wallpaper and lock screen, so they stay sharp on large monitors.
 
@@ -70,6 +90,13 @@ Design choices:
 | `helper/chat.py` | AI chat against a local Ollama model, with approve-before-run tool calls |
 | `helper/google_sync.py` | Google Tasks (two-way) and Calendar (read-only); OAuth loopback + PKCE, DPAPI-encrypted token |
 | `helper/calendar_ics.py` | iCal parser: RRULE, EXDATE, RECURRENCE-ID, TZID |
+| `helper/activity.py` | Foreground-app history (names only) and the sitting timer behind the Move widget |
+| `helper/exercise_popup.py` | Non-activating "time to move" card |
+| `helper/spending.py` | Parses card transaction-alert emails into totals |
+| `helper/music.py`, `helper/nowplaying.ps1` | Spotify listening history (top songs/artists, on repeat), read from Windows media controls and kept only on this PC |
+| `helper/spotify_sync.py` | Optional Spotify connection (PKCE sign-in): your Spotify top tracks, and playlists made from the Top songs widget or by Rora after you click Create |
+| `helper/dj.py` | Rora DJ: song picks from your taste and the game in front, queued in Spotify (auto mode), with Save / Like / Dislike feedback kept on this PC |
+| `helper/web_tools.py` | Web search (DuckDuckGo lite, Wikipedia API, optional Brave API) and page-to-text for Rora |
 | `helper/quick_input.py` | Floating DPI-aware input box for typing tasks and chat messages |
 | `install.ps1` | Creates the token, copies the wallpaper into Wallpaper Engine, starts the helper at login |
 | `tools/make_static_wallpaper.py` | Renders the background at native resolution (numpy + Pillow); `--set`, `--lock` |
@@ -101,6 +128,7 @@ If the app stays in Testing mode, Google expires the sign-in weekly, and the wid
 ## Data and privacy
 
 Everything personal stays in `%LOCALAPPDATA%\HomeScreen\` on your PC: token, config, icon cache,
-layout, to-dos, chat history and the encrypted Google token. The only outside requests go to
-Open-Meteo, ipinfo.io (once, for approximate location), Yahoo Finance charts, your calendar
-feeds and Google's APIs.
+layout, to-dos, chat history, app-usage history (app names only, 7 days), exercise log, parsed
+spending totals and the encrypted Google token. The only outside requests go to Open-Meteo,
+ipinfo.io (once, for approximate location), Yahoo Finance charts, your calendar feeds and
+Google's APIs, plus web searches and Claude questions **only after you click Allow** in the chat.

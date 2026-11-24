@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import sys
@@ -31,9 +32,15 @@ import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
+import activity as activity_mod
+import music as music_mod
 import calendar_ics
 import chat as chat_mod
 import google_sync as gsync  # same folder
+import spending as spending_mod
+import spotify_sync as spot
+import dj as dj_mod
+import display as display_mod
 
 APP_DIR = os.path.join(os.environ["LOCALAPPDATA"], "HomeScreen")
 ICON_DIR = os.path.join(APP_DIR, "icons")
@@ -291,6 +298,20 @@ class Gpu:
                     self.handle = h
         except OSError:
             self.nvml = None
+
+    def name(self):
+        if not self.handle:
+            return None
+        buf = ctypes.create_string_buffer(96)
+        if self.nvml.nvmlDeviceGetName(self.handle, buf, 96) == 0:
+            return buf.value.decode(errors="replace")
+        return None
+
+    def power(self):
+        mw = ctypes.c_uint()
+        if self.handle and self.nvml.nvmlDeviceGetPowerUsage(self.handle, ctypes.byref(mw)) == 0:
+            return round(mw.value / 1000)
+        return None
 
     def read(self):
         if not self.handle:
@@ -663,7 +684,7 @@ def google_connect():
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     # pick up the new sign-in quickly
-    CALENDAR.at = GTASKS.at = 0
+    CALENDAR.at = GTASKS.at = MAIL.at = SPEND.at = 0
     return True
 
 
@@ -681,10 +702,29 @@ def open_quick_input(body):
     subprocess.Popen(args, cwd=os.path.dirname(script), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+def fetch_mail():
+    if not gsync.has_scope(gsync.GMAIL_SCOPE):
+        return {"state": "needs-gmail" if gsync.connected() else "off"}
+    return dict(gsync.inbox(8), state="ok")
+
+
+def open_mail(thread):
+    import re
+    if re.fullmatch(r"[0-9a-f]{6,32}", thread or ""):
+        os.startfile(f"https://mail.google.com/mail/u/0/#inbox/{thread}")
+        return True
+    if thread == "inbox":
+        os.startfile("https://mail.google.com/mail/u/0/#inbox")
+        return True
+    return False
+
+
+SPENDING = None  # set up after REG exists
 WEATHER = Cached(fetch_weather, 10 * 60)
 CALENDAR = Cached(fetch_calendar, 10 * 60)
 MARKETS = Cached(fetch_markets, 60)
 GTASKS = Cached(lambda: gsync.list_tasks(tasks_list_id()), 20)
+MAIL = Cached(fetch_mail, 2 * 60)
 
 
 # ---------------------------------------------------------------- media keys
@@ -835,7 +875,491 @@ class Registry:
 
 
 REG = Registry()
-CHAT = chat_mod.Chat(APP_DIR, lambda: REG.load_config()[0])
+_config = lambda: REG.load_config()[0]
+SPENDING = spending_mod.Spending(APP_DIR, _config, tasks_list_id)
+SPEND = Cached(SPENDING.fetch, 90)  # new card alerts show up within ~2 min (one small Gmail search each time)
+ACT = activity_mod.Activity(APP_DIR, _config, PORT)
+MUSIC = music_mod.Music(APP_DIR, _config, os.path.join(os.path.dirname(os.path.abspath(__file__)), "nowplaying.ps1"))
+MEDIA = {"title": "", "artist": "", "playing": False, "at": 0.0}
+
+
+# ---------------------------------------------------------------- what the assistant can see (all local)
+
+def _now_data(cache, wait=True):
+    """Cached data; if the wallpaper never asked for it yet, fetch it now (we're on a chat thread)."""
+    data = cache.get()
+    if data is None and wait:
+        try:
+            data = cache.fetch()
+        except Exception:
+            logging.exception("context fetch failed")
+    return data
+
+
+def _fmt_time(iso_or_ts, all_day=False):
+    t = dt.datetime.fromtimestamp(iso_or_ts) if isinstance(iso_or_ts, (int, float)) else dt.datetime.fromisoformat(iso_or_ts)
+    return t.strftime("%a %d %b") + ("" if all_day else t.strftime(" %H:%M"))
+
+
+def _cpu_name():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+            return " ".join(winreg.QueryValueEx(k, "ProcessorNameString")[0].split())
+    except OSError:
+        return "CPU"
+
+
+def context(topic):
+    topic = topic.lower()
+    if topic == "overview":
+        return snapshot()
+    if topic == "calendar":
+        data = _now_data(CALENDAR) or {}
+        now = dt.datetime.now(calendar_ics.local_tz())
+        evs = [e for e in data.get("events", [])
+               if dt.datetime.fromisoformat(e["end"]) > now - dt.timedelta(days=2)
+               and dt.datetime.fromisoformat(e["start"]) < now + dt.timedelta(days=30)]
+        if not evs:
+            return "No events in the calendar for the next 30 days." if data else "Calendar isn't available."
+        return "Calendar (past 2 days to next 30 days):\n" + "\n".join(
+            f"- {_fmt_time(e['start'], e['allDay'])}" + ("" if e["allDay"] else f"–{e['end'][11:16]}")
+            + f": {e['title']}" + (f" @ {e['location']}" if e.get("location") else "") + f" [{e.get('calendar', '')}]"
+            for e in evs[:40])
+    if topic == "tasks":
+        data = todos_state() or {"items": _now_data(GTASKS) or []}
+        items = data.get("items") or []
+        if not items:
+            return "The to-do list is empty."
+        return "To-do list:\n" + "\n".join(f"- [{'x' if i['done'] else ' '}] {i['text']}" for i in items[:40])
+    if topic == "music":
+        live = ""
+        if MEDIA["title"] and not MUSIC.now:
+            ago = int((time.time() - MEDIA["at"]) / 60)
+            live = (f"{'Playing' if MEDIA['playing'] else 'Paused'}: \"{MEDIA['title']}\" by {MEDIA['artist'] or 'unknown artist'}"
+                    + (f" (last update {ago} min ago)" if ago > 2 else "") + "\n")
+        out = live + MUSIC.describe()
+        st = spot.status()
+        if st == "ok":
+            data = _now_data(SPOT) or {}
+            for rng in ("short_term", "medium_term", "long_term"):
+                if data.get(rng):
+                    out += f"\nSpotify's own top tracks ({SPOT_LABEL[rng]}): " + "; ".join(
+                        f"{t['title']} – {t['artist']}" for t in data[rng][:15])
+            if data.get("artists"):
+                out += "\nSpotify top artists (last 4 weeks): " + ", ".join(
+                    a["artist"] + (f" ({', '.join(a['genres'][:2])})" if a["genres"] else "") for a in data["artists"][:12])
+            if data.get("playlists"):
+                out += "\nUser's Spotify playlists: " + "; ".join(p["name"] for p in data["playlists"][:20])
+            out += "\nSpotify is connected: you can make playlists with the spotify_playlist tool."
+            out += "\n" + DJ.describe()
+        else:
+            out += ("\nSpotify isn't connected, so playlists can't be made yet "
+                    "(the user can click Connect Spotify on the Top songs widget).")
+        return out
+    if topic == "weather":
+        w = _now_data(WEATHER)
+        if not w:
+            return "Weather isn't available."
+        n, u = w["now"], w["unit"]
+        lines = [f"{w['place']}: now {n['temp']}{u} (feels {n['feels']}{u}), humidity {n['humidity']}%, wind {n['wind']} {w['windUnit']}, weather code {n['code']} (WMO).",
+                 "Next hours: " + ", ".join(f"{h['t']} {h['temp']}{u} rain {h['pop']}%" for h in w["hourly"]),
+                 "Days: " + ", ".join(f"{d['date']} {d['lo']}–{d['hi']}{u} rain {d['pop']}%" for d in w["daily"])]
+        return "\n".join(lines)
+    if topic == "markets":
+        m = _now_data(MARKETS)
+        if not m:
+            return "Market data isn't available."
+        rows = []
+        for q in m["quotes"]:
+            if q.get("error"):
+                rows.append(f"- {q['name']}: unavailable")
+                continue
+            rows.append(f"- {q['name']} ({q['symbol']}): {q['price']:,.2f} {q.get('currency') or ''}"
+                        + (f", {q['change']:+.2f}% today" if q.get("change") is not None else "")
+                        + (" (market open)" if q.get("open") else " (market closed)"))
+        return f"Markets (updated {m['updated']}):\n" + "\n".join(rows)
+    if topic == "system":
+        st = read_stats()
+        g = st.get("gpu") or {}
+        up = kernel32.GetTickCount64() / 3600000
+        lines = [f"CPU: {_cpu_name()}, load {st['cpu'] if st['cpu'] is not None else '?'}%",
+                 f"RAM: {st['ramUsedGb']} of {st['ramTotalGb']} GB used ({st['ram']}%)"]
+        if GPU and GPU.handle:
+            lines.append(f"GPU: {GPU.name()}, load {g.get('util', '?')}%, {g.get('temp', '?')} °C, "
+                         f"{GPU.power() or '?'} W, VRAM {g.get('memUsedGb', '?')} of {g.get('memTotalGb', '?')} GB")
+        lines += [f"Disk {d['name']} {d['usedPct']}% used, {d['freeGb']} GB free of {d['totalGb']} GB" for d in st["disks"]]
+        lines.append(f"Uptime: {up:.1f} h")
+        return "\n".join(lines)
+    if topic == "apps":
+        return ACT.describe(24)
+    if topic == "email":
+        m = _now_data(MAIL)
+        if not m or m.get("state") != "ok":
+            return "Email isn't connected yet (needs Gmail permission: Reconnect Google on the wallpaper)."
+        return f"Inbox: {m['unread']} unread. Latest (sender | subject | preview):\n" + "\n".join(
+            f"- {_fmt_time(x['time'])} {'(unread) ' if x['unread'] else ''}{x['from']} | {x['subject']} | {x['snippet'][:140]}"
+            for x in m["messages"])
+    if topic == "spending":
+        return SPENDING.describe(_now_data(SPEND))
+    if topic == "exercise":
+        e = ACT.status()
+        lines = [f"Sitting timer: {e['active'] // 60} min at the desk; break reminder every {e['every'] // 60} min.",
+                 f"Next suggestion: {e['next']['amount']} {e['next']['name']}.",
+                 f"Done today: " + (", ".join(f"{x['amount']} {x['name']}" for x in e["today"]) or "nothing yet") + ".",
+                 f"Streak: {e['streak']} day(s); {e['week']} exercises this week."]
+        return "\n".join(lines)
+    return f"Unknown topic {topic}."
+
+
+def snapshot():
+    """A few lines of 'what's on screen', added to every chat turn (cached data only, no waiting)."""
+    lines = []
+    if ACT.game:
+        lines.append(f"- Gaming right now: {ACT.game}")
+    if MEDIA["title"] and time.time() - MEDIA["at"] < 6 * 3600:
+        lines.append(f"- Music: {'playing' if MEDIA['playing'] else 'paused'} \"{MEDIA['title']}\" by {MEDIA['artist'] or '?'}")
+    w = WEATHER.data
+    if w:
+        lines.append(f"- Weather in {w['place']}: {w['now']['temp']}{w['unit']}, rain chance next hours "
+                     + "/".join(str(h["pop"]) for h in w["hourly"][:4]) + "%")
+    c = CALENDAR.data
+    if c:
+        now = dt.datetime.now(calendar_ics.local_tz())
+        nxt = [e for e in c.get("events", []) if dt.datetime.fromisoformat(e["end"]) > now][:2]
+        if nxt:
+            lines.append("- Next events: " + "; ".join(f"{_fmt_time(e['start'], e['allDay'])} {e['title']}" for e in nxt))
+    try:
+        st = read_stats()
+        g = st.get("gpu") or {}
+        lines.append(f"- PC: CPU {st['cpu']}%, RAM {st['ram']}%, GPU {g.get('util', '?')}% at {g.get('temp', '?')} °C")
+    except Exception:
+        pass
+    rows, _, _ = ACT.recent_apps(1)
+    if rows:
+        lines.append(f"- In front most recently: {rows[-1]['app']}")
+    m = MAIL.data
+    if m and m.get("state") == "ok":
+        lines.append(f"- Email: {m['unread']} unread")
+    e = ACT.status()
+    if e["active"]:
+        lines.append(f"- At the desk for {e['active'] // 60} min without a break")
+    return "\n".join(lines) or "(nothing loaded yet)"
+
+
+# ---------------------------------------------------------------- Spotify (top tracks + playlists)
+def fetch_spotify():
+    st = spot.status()
+    if st != "ok":
+        return {"state": st}
+    try:
+        return dict(spot.snapshot(), state="ok", playlists=spot.my_playlists(20))
+    except RuntimeError as exc:
+        return {"state": spot.status() if spot.status() != "ok" else "error", "error": str(exc)}
+
+
+SPOT = Cached(fetch_spotify, 3 * 3600)
+SPOT_RANGE = {7: "short_term", 30: "medium_term"}  # anything longer -> long_term
+SPOT_LABEL = {"short_term": "last 4 weeks", "medium_term": "last 6 months", "long_term": "all time"}
+PLAYLIST_JOB = {"busy": False, "result": None, "error": None, "at": 0.0}
+_last_spotify_connect = 0.0
+
+
+def spotify_connect():
+    global _last_spotify_connect
+    if time.time() - _last_spotify_connect < 30 or not spot.client_id():
+        return False
+    _last_spotify_connect = time.time()
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    subprocess.Popen([sys.executable, os.path.join(here, "spotify_sync.py"), "connect"], cwd=here,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    spot._token, spot._expired = None, False
+
+    def pick_up():  # refresh once the sign-in has finished
+        for _ in range(60):
+            time.sleep(5)
+            if os.path.exists(spot.TOKEN_FILE) and time.time() - os.stat(spot.TOKEN_FILE).st_mtime < 300:
+                spot._token = None
+                SPOT.at = 0
+                SPOT.get()
+                return
+    threading.Thread(target=pick_up, daemon=True).start()
+    return True
+
+
+PLAYLIST_SOURCES = {
+    "my_top_week": ("local", 7), "my_top_month": ("local", 30), "my_top_all_time": ("local", 3650),
+    "on_repeat": ("repeat", 3), "spotify_top_4_weeks": ("spotify", "short_term"),
+    "spotify_top_6_months": ("spotify", "medium_term"), "spotify_top_all_time": ("spotify", "long_term"),
+}
+
+
+def playlist_songs(source, limit=25, songs=None):
+    """Songs for a playlist: from the local history, Spotify's own top lists, or a given list."""
+    limit = max(1, min(100, int(limit or 25)))
+    if source == "songs" or not source:
+        return [{"title": str(s.get("title", ""))[:150], "artist": str(s.get("artist", ""))[:150]}
+                for s in (songs or []) if isinstance(s, dict) and s.get("title")][:limit], "the songs you listed"
+    kind, arg = PLAYLIST_SOURCES.get(source, ("local", 7))
+    if kind == "repeat":
+        return MUSIC.on_repeat(limit), "songs on repeat"
+    if kind == "local":
+        got = MUSIC.top(arg, limit)["songs"]
+        if len(got) >= min(5, limit):
+            return got, f"your most played ({'this week' if arg == 7 else 'this month' if arg == 30 else 'all time'})"
+        arg = SPOT_RANGE.get(arg, "long_term")  # not enough local history yet: use Spotify's list
+    data = _now_data(SPOT) or {}
+    return (data.get(arg) or [])[:limit], f"Spotify's top tracks ({SPOT_LABEL[arg]})"
+
+
+def make_playlist(name, source, limit=25, songs=None, description=""):
+    picked, label = playlist_songs(source, limit, songs)
+    if not picked:
+        raise RuntimeError("There are no songs for that yet (not enough listening history).")
+    res = spot.create_playlist(name or "Rora's playlist", picked,
+                               description or f"Made by Rora on the home screen from {label}.")
+    SPOT.at = 0  # show it in the playlist list soon
+    return res, label
+
+
+def start_widget_playlist(days):
+    """The Top songs widget's 'Save as playlist' button (runs in the background)."""
+    if PLAYLIST_JOB["busy"]:
+        return False
+    source = {7: "my_top_week", 30: "my_top_month"}.get(days, "my_top_all_time")
+    today = dt.date.today()
+    name = {7: f"Top songs · week of {today:%d %b}", 30: f"Top songs · {today:%B %Y}"}.get(days, f"All-time favourites · {today:%b %Y}")
+
+    def run():
+        try:
+            res, label = make_playlist(name, source, 30)
+            PLAYLIST_JOB.update(result=dict(res, label=label), error=None)
+        except Exception as exc:
+            logging.warning("playlist failed: %s", exc)
+            PLAYLIST_JOB.update(result=None, error=str(exc))
+        PLAYLIST_JOB.update(busy=False, at=time.time())
+        MUSIC.rev += 1
+    PLAYLIST_JOB.update(busy=True, result=None, error=None)
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+def chat_calendar(args):
+    """Rora's add_calendar_event tool (only runs after the user clicks Add)."""
+    if not gsync.connected():
+        return 1, "Google isn't connected yet: the user needs to sign in to Google from the calendar widget first."
+    if not gsync.has_scope(gsync.CAL_WRITE_SCOPE):
+        opened = google_connect()
+        return 1, ("Google Calendar only allows reading so far. " + (
+            "A Google sign-in page just opened in the browser: the user should allow 'View and edit events', "
+            "then ask again." if opened else "The user should click Reconnect Google, allow 'View and edit "
+            "events', then ask again."))
+    tz = calendar_ics.local_tz()
+    title = " ".join(str(args.get("title") or "").split())[:200]
+    if not title:
+        return 1, "No title given."
+    try:
+        day = dt.date.fromisoformat(str(args.get("date") or "").strip())
+    except ValueError:
+        return 1, "The date must be YYYY-MM-DD."
+
+    def hhmm(v):
+        v = str(v or "").strip().lower().replace(".", ":")
+        if not v:
+            return None
+        for f in ("%H:%M", "%I:%M%p", "%I:%M %p", "%I%p", "%I %p", "%H"):
+            try:
+                return dt.datetime.strptime(v, f).time()
+            except ValueError:
+                continue
+        raise ValueError(v)
+    try:
+        st, en = hhmm(args.get("start_time")), hhmm(args.get("end_time"))
+    except ValueError as exc:
+        return 1, f"Couldn't read the time {exc}; use HH:MM (24-hour)."
+    loc = str(args.get("location") or "")[:300]
+    notes = str(args.get("notes") or "")[:2000]
+    tentative = bool(args.get("tentative"))
+    repeat = str(args.get("repeat") or "none").lower()
+    if repeat not in ("daily", "weekdays", "weekly", "monthly"):
+        repeat = "none"
+    days, skipped = [day], {}
+    if repeat != "none":
+        try:
+            until = dt.date.fromisoformat(str(args.get("repeat_until") or "").strip())
+        except ValueError:
+            return 1, "A repeating event needs repeat_until (YYYY-MM-DD, the last day it can happen)."
+        until = min(until, day + dt.timedelta(days=366))
+        if until < day:
+            return 1, "repeat_until is before the first date."
+        days, d = [], day
+        while d <= until:
+            if (repeat == "daily" or (repeat == "weekdays" and d.weekday() < 5)
+                    or (repeat == "weekly" and d.weekday() == day.weekday()) or (repeat == "monthly" and d.day == day.day)):
+                days.append(d)
+            d += dt.timedelta(days=1)
+        if args.get("skip_holidays", True) is not False:
+            try:
+                hol = gsync.public_holidays(day, until)
+            except Exception:
+                logging.exception("public holidays lookup failed")
+                hol = {}
+            skipped = {d: hol[d] for d in days if d in hol}
+            days = [d for d in days if d not in skipped]
+        if not days:
+            return 1, "No days are left in that range (all were public holidays or didn't match the pattern)."
+        day = days[0]  # start on the first real occurrence
+    if st is None:  # all-day (end date is exclusive in Google Calendar)
+        try:
+            last = dt.date.fromisoformat(str(args.get("end_date") or "").strip()) if args.get("end_date") else day
+        except ValueError:
+            last = day
+        start, end, all_day = day, max(last, day) + dt.timedelta(days=1), True
+        when = day.strftime("%a %d %b %Y") + (f" to {last.strftime('%a %d %b')}" if last > day else "") + " (all day)"
+    else:
+        start = dt.datetime.combine(day, st, tz)
+        if en is not None:
+            end = dt.datetime.combine(day, en, tz)
+            if end <= start:
+                end += dt.timedelta(days=1)  # e.g. 22:00-01:00
+        else:
+            end = start + dt.timedelta(minutes=max(5, min(24 * 60, int(args.get("duration_minutes") or 60))))
+        all_day = False
+        when = f"{start.strftime('%a %d %b %Y, %H:%M')}-{end.strftime('%H:%M')}"
+    recurrence, tz_name = None, ""
+    if repeat != "none":
+        try:
+            tz_name = gsync.user_timezone()
+        except Exception:
+            tz_name = ""
+        rule = {"daily": "FREQ=DAILY", "weekdays": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+                "weekly": "FREQ=WEEKLY", "monthly": "FREQ=MONTHLY"}[repeat]
+        last = days[-1]
+        if all_day:
+            recurrence = [f"RRULE:{rule};UNTIL={last:%Y%m%d}"]
+            ex = [d for d in skipped if days[0] < d < last]
+            if ex:
+                recurrence.append("EXDATE;VALUE=DATE:" + ",".join(f"{d:%Y%m%d}" for d in sorted(ex)))
+        else:
+            last_end = dt.datetime.combine(last, st, tz).astimezone(dt.timezone.utc)
+            recurrence = [f"RRULE:{rule};UNTIL={last_end:%Y%m%dT%H%M%SZ}"]
+            ex = [d for d in skipped if days[0] < d < last]
+            if ex:
+                recurrence.append("EXDATE:" + ",".join(
+                    f"{dt.datetime.combine(d, st, tz).astimezone(dt.timezone.utc):%Y%m%dT%H%M%SZ}" for d in sorted(ex)))
+        span = f"{days[0]:%a %d %b} to {last:%a %d %b %Y}"
+        when = (f"{ {'daily': 'every day', 'weekdays': 'every weekday', 'weekly': 'every ' + days[0].strftime('%A'), 'monthly': 'monthly'}[repeat]}"
+                f" {span}, " + ("all day" if all_day else f"{start:%H:%M}-{end:%H:%M}") + f" ({len(days)} days)")
+    try:
+        ev = gsync.create_event(title, start, end, all_day, loc, notes, tz_name, recurrence, tentative)
+    except urllib.error.HTTPError as exc:
+        return 1, f"Google Calendar refused it ({exc.code}): {exc.read()[:300].decode('utf-8', 'replace')}"
+    except Exception as exc:
+        return 1, f"Couldn't reach Google Calendar: {exc}"
+    CALENDAR.at = 0  # show it on the calendar widget straight away
+    clash = []
+    for e in (CALENDAR.data or {}).get("events") or []:
+        try:
+            es, ee = dt.datetime.fromisoformat(e["start"]), dt.datetime.fromisoformat(e["end"])
+        except (KeyError, ValueError):
+            continue
+        s0 = start if not all_day else dt.datetime.combine(start, dt.time(), tz)
+        e0 = end if not all_day else dt.datetime.combine(end, dt.time(), tz)
+        if es < e0 and ee > s0 and not (e.get("allDay") and not all_day):
+            clash.append(f"{e['title']} ({es.strftime('%H:%M') if not e.get('allDay') else 'all day'})")
+    msg = f"Added \"{title}\" to Google Calendar: {when}" + (f", at {loc}" if loc else "") + "."
+    if tentative:
+        msg += " Marked as tentative (to be confirmed)."
+    if skipped:
+        msg += " Skipped public holidays: " + "; ".join(f"{n} ({d:%a %d %b})" for d, n in sorted(skipped.items())) + "."
+    elif repeat != "none":
+        msg += " No public holidays fall in that range."
+    if clash:
+        msg += " It overlaps with: " + "; ".join(clash[:3]) + "."
+    return 0, msg, {"link": ev.get("htmlLink", "")}
+
+
+def chat_playlist(args):
+    """Rora's spotify_playlist tool (only runs after the user clicks Allow)."""
+    if spot.status() != "ok":
+        return 1, "Spotify isn't connected yet (the user needs to click Connect Spotify on the Top songs widget)."
+    try:
+        res, label = make_playlist(str(args.get("name") or "")[:100], str(args.get("source") or "songs"),
+                                   args.get("limit") or 25, args.get("songs"), str(args.get("description") or ""))
+    except Exception as exc:
+        return 1, f"Couldn't make the playlist: {exc}"
+    out = f"Created playlist \"{res['name']}\" from {label} with {len(res['added'])} songs: {res['url']}\n"
+    out += "Songs: " + "; ".join(res["added"])
+    if res["missing"]:
+        out += "\nNot found on Spotify (skipped): " + "; ".join(res["missing"])
+    return 0, out
+
+
+def music_status(days):
+    out = MUSIC.status(days)
+    data = SPOT.get() if spot.status() == "ok" else None
+    rng = SPOT_RANGE.get(days, "long_term")
+    out["spotify"] = {"state": spot.status(), "label": SPOT_LABEL[rng],
+                      "top": [{"title": t["title"], "artist": t["artist"]} for t in ((data or {}).get(rng) or [])[:8]]}
+    out["playlistJob"] = {k: PLAYLIST_JOB[k] for k in ("busy", "result", "error", "at")}
+    return out
+
+
+def chat_recommend(args):
+    """Rora's recommend_songs tool: songs she picked, looked up on Spotify, shown as cards with buttons."""
+    if spot.status() != "ok":
+        return 1, "Spotify isn't connected, so songs can't be looked up or played. Recommend in words instead."
+    songs = [s for s in (args.get("songs") or []) if isinstance(s, dict) and s.get("title")]
+    if not songs:
+        return 1, "No songs given."
+    try:
+        recs, missing, familiar = DJ.add_recs(songs)
+    except RuntimeError as exc:
+        return 1, f"Spotify lookup failed: {exc}"
+    text = "Shown to the user as cards with Play / Queue / Save / Like / Dislike buttons: " + "; ".join(
+        f"{r['title']} – {r['artist']}" for r in recs)
+    if missing:
+        text += "\nNot found on Spotify (not shown; don't mention them as available): " + "; ".join(missing)
+    if familiar:
+        text += ("\nLeft out because the user already plays them a lot: " + "; ".join(familiar)
+                 + ". Call recommend_songs once more with the same number of NEW songs they probably don't know "
+                   "(similar artists / genres), unless you've already done that.")
+    if not spot.dj_ready():
+        text += ("\nNote: playing/queueing needs one more Spotify permission: tell the user to click "
+                 "'Reconnect Spotify' on the Top songs widget.")
+    return (0 if recs else 1), text, {"recs": [{k: r[k] for k in ("id", "title", "artist", "why", "status")} for r in recs]}
+
+
+def chat_dj(args):
+    action = str(args.get("action", ""))
+    if action in ("auto_on", "auto_off"):
+        if action == "auto_on" and not spot.dj_ready():
+            return 1, "Rora DJ needs Spotify playback permission first: the user should click 'Reconnect Spotify'."
+        DJ.set_auto(action == "auto_on")
+        return 0, f"DJ auto mode is now {'on: songs will keep playing' if action == 'auto_on' else 'off'}."
+    if action == "steer":
+        st = DJ.steer(args.get("request", ""))
+        if st["request"]:
+            msg = f"The DJ is now steered to \"{st['request']}\": new picks are being chosen and start with the next song."
+        else:
+            msg = "The DJ is back to its normal mix."
+        if not st["auto"]:
+            msg += " Note: auto mode is off, so nothing plays by itself; use auto_on if the user wants it playing."
+        return 0, msg
+    if action in ("skip", "like", "dislike", "save"):
+        res = DJ.act_on("dislike" if action == "skip" else action)
+        return (0, f"Done ({action}).") if res.get("ok") else (1, res.get("error", "failed"))
+    return 1, "Unknown action."
+
+
+CHAT = chat_mod.Chat(APP_DIR, _config, context=context, snapshot=snapshot,
+                     tools={"add_calendar_event": chat_calendar, "spotify_playlist": chat_playlist, "recommend_songs": chat_recommend, "dj_control": chat_dj})
+DJ = dj_mod.DJ(APP_DIR, MUSIC, ACT, CHAT.complete_json)
+DISPLAY = display_mod.Display(activity_mod.idle_seconds,
+                              lambda: bool(ACT.game) or activity_mod.notification_state() in (2, 3, 4))
+DJ.spotify_snapshot = lambda: SPOT.data if isinstance(SPOT.data, dict) and SPOT.data.get("state") == "ok" else None
 TOKEN = ""
 
 
@@ -890,6 +1414,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not png:
                     return self._send(404, {"error": "no icon"})
                 return self._send(200, png, "image/png", "max-age=31536000, immutable")
+            if method == "GET" and url.path == "/power":
+                return self._send(200, {"idle": round(activity_mod.idle_seconds(), 1),
+                                        "spotify": MUSIC.app_open(), "game": ACT.game,
+                                        "dj": bool(DJ.auto), "chat_busy": bool(CHAT.data.get("busy")),
+                                        "display": DISPLAY.status()})
             if method == "GET" and url.path == "/stats":
                 return self._send(200, read_stats())
             if method == "GET" and url.path == "/weather":
@@ -907,6 +1436,20 @@ class Handler(BaseHTTPRequestHandler):
                 if query.get("rev", [""])[0] == str(data.get("rev", 0)):
                     return self._send(200, {"rev": data.get("rev", 0), "unchanged": True})
                 return self._send(200, data)
+            if method == "GET" and url.path == "/mail":
+                return self._send(200, MAIL.payload())
+            if method == "GET" and url.path == "/spending":
+                return self._send(200, SPEND.payload())
+            if method == "GET" and url.path == "/music":
+                try:
+                    days = max(1, min(3650, int(query.get("days", ["7"])[0])))
+                except ValueError:
+                    days = 7
+                return self._send(200, music_status(days))
+            if method == "GET" and url.path == "/dj":
+                return self._send(200, DJ.status())
+            if method == "GET" and url.path == "/exercise":
+                return self._send(200, ACT.status())
             if method == "GET" and url.path == "/chat":
                 state = CHAT.state()
                 if query.get("rev", [""])[0] == str(state["rev"]):
@@ -929,6 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
                     action = url.path.split("/", 2)[2]
                     if action == "prompt":
                         open_quick_input(dict(body, mode="chat"))
+                        CHAT.warm()  # load the model while the user types
                         return self._send(200, {"ok": True})
                     if action == "send":
                         return self._send(200, CHAT.send(body.get("text", "")))
@@ -938,11 +1482,53 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, CHAT.stop())
                     if action == "clear":
                         return self._send(200, CHAT.clear())
+                if url.path.startswith("/exercise/"):
+                    return self._send(200, ACT.record(url.path.split("/", 2)[2]))
+                if url.path == "/spending/paid":
+                    ok = SPENDING.mark_paid(body.get("month", ""), body.get("paid", True) is not False)
+                    with SPEND.lock:
+                        if SPEND.data and SPEND.data.get("state") == "ok":
+                            SPEND.data = SPENDING.summary()
+                    return self._send(200, {"ok": ok, **SPEND.payload()})
+                if url.path == "/mail/open":
+                    return self._send(200, {"ok": open_mail(str(body.get("thread", "")))})
+                if url.path == "/context/media":
+                    MEDIA.update(title=str(body.get("title") or "")[:200], artist=str(body.get("artist") or "")[:200],
+                                 playing=bool(body.get("playing")), at=time.time())
+                    return self._send(200, {"ok": True})
+                if url.path == "/spotify/connect":
+                    return self._send(200, {"ok": spotify_connect()})
+                if url.path == "/dj/auto":
+                    return self._send(200, DJ.set_auto(body.get("on") is True))
+                if url.path == "/dj/act" and body.get("action") in ("play", "queue", "like", "dislike", "save"):
+                    res = DJ.act_on(body["action"], str(body.get("id") or ""))
+                    return self._send(200, dict(res, dj=DJ.status()))
+                if url.path == "/dj/steer":
+                    return self._send(200, DJ.steer(body.get("request", "")))
+                if url.path == "/dj/pick":
+                    threading.Thread(target=DJ._refill, daemon=True).start()
+                    return self._send(200, {"ok": True})
+                if url.path == "/spotify/open":
+                    pid = str(body.get("id", ""))
+                    ok = bool(re.fullmatch(r"[A-Za-z0-9]{10,40}", pid))
+                    if ok:
+                        os.startfile(f"spotify:playlist:{pid}")  # opens it in the Spotify app
+                    return self._send(200, {"ok": ok})
+                if url.path == "/spotify/playlist":
+                    try:
+                        days = int(body.get("days", 7))
+                    except (TypeError, ValueError):
+                        days = 7
+                    return self._send(200, {"ok": start_widget_playlist(days)})
                 if url.path == "/google/connect":
                     return self._send(200, {"ok": google_connect()})
                 if url.path == "/layout" and isinstance(body, dict):
                     save_layout(body)
                     return self._send(200, {"ok": True})
+                if url.path == "/display/rest":  # wallpaper resting: lower the refresh rate (restored on any input)
+                    if body.get("on"):
+                        return self._send(200, DISPLAY.lower(int(body.get("hz") or 120)))
+                    return self._send(200, DISPLAY.restore())
                 if url.path == "/power" and body.get("action") in ("restart", "shutdown"):
                     import subprocess
                     flag = "/r" if body["action"] == "restart" else "/s"
@@ -978,7 +1564,15 @@ def main():
         server = HTTPServer((HOST, PORT), Handler)
     except OSError:
         sys.exit(0)  # already running
-    server.serve_forever()
+    ACT.start()
+    MUSIC.start()
+    DJ.start()
+    try:
+        server.serve_forever()
+    finally:
+        ACT.save()
+        MUSIC.save()
+        DJ.save()
 
 
 if __name__ == "__main__":

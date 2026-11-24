@@ -10,3 +10,7 @@ out/
 client_secret*.json
 google_client*.json
 *.bin
+
+# monitor EDID dumps (contain the monitor serial)
+tools/edid_*.bin
+tools/edid_*.log

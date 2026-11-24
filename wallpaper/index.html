@@ -85,6 +85,35 @@
           <svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7V5Z"/></svg>
         </button>
       </div>
+      <div class="dj" id="dj">
+        <div class="dj-top">
+          <span class="dj-badge">DJ Rora</span>
+          <button class="dj-req" id="djReq" hidden></button>
+          <span class="dj-info" id="djInfo">Picks songs for your taste</span>
+          <button class="dj-auto" id="djAuto" aria-pressed="false">Auto</button>
+        </div>
+        <div class="dj-btns" id="djBtns">
+          <button class="dj-b" id="djSave" title="Save to Liked Songs (counts as a like)">♥ Save</button>
+          <button class="dj-b" id="djLike" title="Rora will pick more like this">👍 Like</button>
+          <button class="dj-b" id="djSkip" title="Skip it; Rora won't pick songs like it">👎 Skip</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card widget topsongs" data-widget="topsongs" data-title="Top songs">
+      <h3>Top songs <span class="sub" id="tsSub"></span></h3>
+      <div class="ts-tabs" id="tsTabs">
+        <button class="ts-tab on" data-days="7">Week</button>
+        <button class="ts-tab" data-days="30">Month</button>
+        <button class="ts-tab" data-days="3650">All time</button>
+      </div>
+      <div class="ts-list" id="tsList"><div class="cal-empty">Loading…</div></div>
+      <div class="ts-artists" id="tsArtists"></div>
+      <div class="todo-actions ts-actions">
+        <button class="pill add" id="tsConnect" hidden>Connect Spotify</button>
+        <button class="pill" id="tsSave" hidden>Save as playlist</button>
+        <span class="ts-note" id="tsNote"></span>
+      </div>
     </section>
 
     <section class="card widget markets" data-widget="markets" data-title="Markets">
@@ -132,12 +161,65 @@
         <button class="pill add google-reconnect" hidden>Reconnect Google</button>
       </div>
     </section>
-    <section class="card widget chat" data-widget="chat" data-title="AI chat">
-      <h3>Assistant <span class="sub" id="chatModel">Private · on this PC</span></h3>
+    <section class="card widget mail" data-widget="mail" data-title="Mail">
+      <h3>Mail <span class="sub" id="mailCount"></span></h3>
+      <div class="mail-list" id="mailList"><div class="cal-empty">Loading mail…</div></div>
+      <div class="todo-actions">
+        <button class="pill" id="mailOpen">Open Gmail</button>
+        <button class="pill add google-grant" hidden>Allow Gmail access</button>
+      </div>
+    </section>
+
+    <section class="card widget spending" data-widget="spending" data-title="Spending">
+      <h3>Spending <span class="sub" id="spCard"></span></h3>
+      <div class="sp-body" id="spBody"><div class="cal-empty">Loading…</div></div>
+      <div class="todo-actions">
+        <button class="pill add google-grant" hidden>Allow Gmail access</button>
+      </div>
+    </section>
+
+    <section class="card widget move" data-widget="move" data-title="Move">
+      <div class="mv-row">
+        <div class="mv-ring" id="mvRing">
+          <svg viewBox="0 0 100 100"><circle class="track" cx="50" cy="50" r="42"/><circle class="fill" id="mvFill" cx="50" cy="50" r="42"/></svg>
+          <div class="mv-mins"><b id="mvMins">0</b><span>min</span></div>
+        </div>
+        <div class="mv-info">
+          <div class="mv-head">Move break</div>
+          <div class="mv-next" id="mvNext">10 Push-ups</div>
+          <div class="mv-sub" id="mvSub">in 60 min</div>
+        </div>
+      </div>
+      <div class="mv-foot">
+        <div class="mv-stats" id="mvStats"></div>
+        <div class="mv-btns">
+          <button class="pill" id="mvSwap" aria-label="Suggest another exercise">↻</button>
+          <button class="pill add" id="mvDone">Did it ✓</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card widget chat" data-widget="chat" data-title="Rora">
+      <h3>Rora <span class="sub" id="chatModel">Private · on this PC</span></h3>
+      <div class="chat-boot" id="chatBoot" hidden>
+        <div class="boot-core">
+          <svg viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="orbit o1" cx="60" cy="60" r="52"/>
+            <circle class="orbit o2" cx="60" cy="60" r="40"/>
+            <circle class="orbit o3" cx="60" cy="60" r="28"/>
+            <circle class="nucleus" cx="60" cy="60" r="11"/>
+          </svg>
+        </div>
+        <div class="boot-text">
+          <div class="boot-title" id="bootTitle">Waking up Rora</div>
+          <div class="boot-step" id="bootStep">Starting the AI engine…</div>
+          <div class="boot-bar"><i id="bootBar"></i></div>
+        </div>
+      </div>
       <div class="chat-log" id="chatLog"></div>
       <div class="chat-error" id="chatError" hidden></div>
       <div class="todo-actions">
-        <button class="pill add" id="chatAsk">Ask something…</button>
+        <button class="pill add" id="chatAsk">Ask Rora…</button>
         <button class="pill" id="chatStop" hidden>Stop</button>
         <button class="pill" id="chatClear" hidden>New chat</button>
       </div>

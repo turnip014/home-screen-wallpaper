@@ -34,11 +34,15 @@ APP_DIR = os.path.join(os.environ["LOCALAPPDATA"], "HomeScreen")
 CLIENT_FILE = os.path.join(APP_DIR, "google_client.json")
 TOKEN_FILE = os.path.join(APP_DIR, "google_token.bin")
 CLEARED_FILE = os.path.join(APP_DIR, "google_cleared.json")
-SCOPES = ["https://www.googleapis.com/auth/tasks", "https://www.googleapis.com/auth/calendar.readonly"]
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+CAL_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"  # add events (Rora's add_calendar_event)
+SCOPES = ["https://www.googleapis.com/auth/tasks", "https://www.googleapis.com/auth/calendar.readonly", GMAIL_SCOPE,
+          CAL_WRITE_SCOPE]
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 TASKS = "https://tasks.googleapis.com/tasks/v1"
 CAL = "https://www.googleapis.com/calendar/v3"
+GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DONE_DAYS = 3  # completed tasks stay visible (crossed out) this long
 
 
@@ -112,6 +116,17 @@ def _load_token():
 
 def connected():
     return os.path.exists(TOKEN_FILE) and os.path.exists(CLIENT_FILE)
+
+
+def has_scope(scope):
+    """False until the user re-signs in with a scope added later (e.g. Gmail)."""
+    if not connected():
+        return False
+    try:
+        with _lock:
+            return scope in (_load_token() or {}).get("scope", "")
+    except (OSError, ValueError):
+        return False
 
 
 def _post_form(url, fields):
@@ -305,6 +320,134 @@ def calendar_events(start, end, local_tz):
             if not page:
                 break
     return events
+
+
+_TZ = {}
+
+
+def user_timezone():
+    """The IANA time zone set in the user's Google Calendar (e.g. needed for repeating events)."""
+    if "v" not in _TZ:
+        _TZ["v"] = api("GET", f"{CAL}/users/me/settings/timezone").get("value") or ""
+    return _TZ["v"]
+
+
+def public_holidays(first, last):
+    """{date: name} of public holidays between two dates (inclusive), from the holiday calendars the
+    user subscribes to in Google Calendar (e.g. 'Holidays in <country>'). Observances are left out."""
+    out = {}
+    cals = api("GET", f"{CAL}/users/me/calendarList").get("items", [])
+    for c in cals:
+        if "#holiday@group.v.calendar.google.com" not in c.get("id", ""):
+            continue
+        res = api("GET", f"{CAL}/calendars/{urllib.parse.quote(c['id'])}/events", params={
+            "timeMin": f"{first.isoformat()}T00:00:00Z", "timeMax": f"{(last + dt.timedelta(days=1)).isoformat()}T23:59:59Z",
+            "singleEvents": "true", "maxResults": 250})
+        for e in res.get("items", []):
+            d = (e.get("start") or {}).get("date")
+            if d and str(e.get("description") or "").lower().startswith("public holiday"):
+                day = dt.date.fromisoformat(d)
+                if first <= day <= last:
+                    out[day] = e.get("summary") or "Public holiday"
+    return out
+
+
+def create_event(title, start, end, all_day, location="", notes="", tz_name="", recurrence=None, tentative=False):
+    """Adds an event to the user's primary Google Calendar; returns Google's event (id, htmlLink...)."""
+    body = {"summary": title}
+    if recurrence:
+        body["recurrence"] = recurrence
+    if tentative:
+        body["status"] = "tentative"
+    if all_day:
+        body["start"], body["end"] = {"date": start.isoformat()}, {"date": end.isoformat()}
+    else:
+        body["start"], body["end"] = {"dateTime": start.isoformat()}, {"dateTime": end.isoformat()}
+        if tz_name:
+            body["start"]["timeZone"] = body["end"]["timeZone"] = tz_name
+    if location:
+        body["location"] = location
+    if notes:
+        body["description"] = notes
+    return api("POST", f"{CAL}/calendars/primary/events", body=body)
+
+
+# ---------------------------------------------------------------- Gmail (read-only)
+def _header(msg, name):
+    for h in (msg.get("payload") or {}).get("headers") or []:
+        if h.get("name", "").lower() == name.lower():
+            return h.get("value", "")
+    return ""
+
+
+def _sender_name(value):
+    value = value.strip()
+    if "<" in value:
+        name = value.split("<", 1)[0].strip().strip('"')
+        return name or value.split("<", 1)[1].rstrip(">")
+    return value
+
+
+def inbox(limit=8):
+    """Unread count + the newest inbox messages (sender, subject, snippet, time). Bodies aren't fetched."""
+    label = api("GET", f"{GMAIL}/labels/INBOX")
+    listed = api("GET", f"{GMAIL}/messages", params={"labelIds": "INBOX", "maxResults": limit}).get("messages") or []
+    out = []
+    for m in listed:
+        msg = api("GET", f"{GMAIL}/messages/{m['id']}",
+                  params=[("format", "metadata"), ("metadataHeaders", "From"), ("metadataHeaders", "Subject")])
+        out.append({"id": msg["id"], "thread": msg.get("threadId", msg["id"]),
+                    "from": _sender_name(_header(msg, "From"))[:80], "subject": _header(msg, "Subject")[:200] or "(no subject)",
+                    "snippet": html_unescape(msg.get("snippet", ""))[:240],
+                    "unread": "UNREAD" in (msg.get("labelIds") or []),
+                    "time": int(msg.get("internalDate", "0")) / 1000})
+    return {"unread": label.get("messagesUnread", 0), "messages": out}
+
+
+def html_unescape(s):
+    import html
+    return html.unescape(s)
+
+
+def search_messages(query, limit=100):
+    ids, page = [], None
+    while len(ids) < limit:
+        params = {"q": query, "maxResults": min(100, limit - len(ids))}
+        if page:
+            params["pageToken"] = page
+        res = api("GET", f"{GMAIL}/messages", params=params)
+        ids += [m["id"] for m in res.get("messages") or []]
+        page = res.get("nextPageToken")
+        if not page:
+            break
+    return ids
+
+
+def message_text(msg_id):
+    """(internal timestamp, subject, plain text body) of one message."""
+    import html
+    import re
+    msg = api("GET", f"{GMAIL}/messages/{msg_id}", params={"format": "full"})
+    plain, rich = [], []
+
+    def walk(part):
+        mime = part.get("mimeType", "")
+        data = (part.get("body") or {}).get("data")
+        if data:
+            text = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", "replace")
+            (plain if mime == "text/plain" else rich if mime == "text/html" else []).append(text)
+        for p in part.get("parts") or []:
+            walk(p)
+
+    walk(msg.get("payload") or {})
+    if plain:
+        body = "\n".join(plain)
+    else:
+        body = re.sub(r"(?is)<(script|style).*?</\1>", " ", "\n".join(rich))
+        body = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d)>", "\n", body)
+        body = html.unescape(re.sub(r"<[^>]+>", " ", body))
+    body = "\n".join(" ".join(line.split()) for line in body.splitlines() if line.strip())
+    return int(msg.get("internalDate", "0")) / 1000, _header(msg, "Subject"), body
 
 
 # ---------------------------------------------------------------- CLI

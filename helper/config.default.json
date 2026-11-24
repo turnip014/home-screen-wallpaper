@@ -75,6 +75,21 @@
     "model": "qwen3:30b",
     "keep_alive": "5m",
     "ollama": "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe",
-    "models_dir": ""
+    "models_dir": "",
+    "about": ""
+  },
+  "spending": {
+    "card_last4": "",
+    "budget": 0,
+    "currency": "USD",
+    "query": "from:alerts@yourbank.example (transaction OR alert OR card)"
+  },
+  "music": {"enabled": true, "apps": ["spotify"]},
+  "spotify": {"client_id": ""},
+  "exercise": {
+    "enabled": true,
+    "every_minutes": 60,
+    "break_minutes": 5,
+    "snooze_minutes": 15
   }
 }
