@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -52,6 +53,15 @@ class DJ:
         self.error = None
         self.rev = 0
         self.last_seen = None   # key of the song seen playing last tick
+        # light mode: while a game runs or the GPU is busy, picks come from songs Rora already knows
+        # fit (no AI model on the GPU), and the model is unloaded to give the VRAM back
+        self.gpu_util = lambda: None        # set by the helper: () -> GPU utilisation % or None
+        self.chat_busy = lambda: False      # set by the helper: Rora is answering in chat
+        self.unload = lambda: None          # set by the helper: unload the AI model from the GPU
+        self.limits = lambda: {}            # set by the helper: config "dj" section
+        self.light = ""                     # why light mode is on ("" = off)
+        self.gpu_avg = 0.0
+        self.calm_since = 0.0
 
     # ---- storage
     def _load(self):
@@ -130,7 +140,7 @@ class DJ:
         res = {}
         for attempt in range(2):  # the model occasionally returns a placeholder-ish answer: ask once more
             res = self.llm([{"role": "user", "content": prompt}], SCHEMA, think=True,
-                           keep_alive="20s" if game else None)  # free the GPU quickly while gaming
+                           keep_alive="20s" if (game or self.light) else None)  # free the GPU quickly while gaming
             good = [x for x in res.get("songs") or [] if isinstance(x, dict) and x.get("title") and x.get("artist")
                     and str(x.get("why", "")).strip().lower() not in ("", "why")]
             if len(good) >= n and str(res.get("mood", "")).strip().lower() not in ("", "mood"):
@@ -312,6 +322,87 @@ class DJ:
             self.error = str(exc)
             self._bump()
 
+    def _update_light(self):
+        """Light mode on while a game runs or the GPU stays busy; off after a calm minute."""
+        lim = self.limits() or {}
+        threshold = float(lim.get("gpu_limit", 40))
+        if not self.busy and not self.chat_busy():  # only measure when our own model isn't the load
+            u = self.gpu_util()
+            if u is not None:
+                self.gpu_avg = u if not self.gpu_avg else self.gpu_avg * 0.7 + u * 0.3
+        why = ""
+        if self.act.game and lim.get("light_when_gaming", True) is not False:
+            why = f"playing {self.act.game}"
+        elif threshold > 0 and self.gpu_avg > threshold:
+            why = f"GPU busy ({self.gpu_avg:.0f}%)"
+        now = time.time()
+        if why:
+            self.calm_since = 0.0
+            if not self.light:
+                logging.info("dj: light mode on (%s)", why)
+                if not self.chat_busy():
+                    threading.Thread(target=self.unload, daemon=True).start()
+            if self.light != why:
+                self.light = why
+                self._bump()
+        elif self.light:
+            self.calm_since = self.calm_since or now
+            if now - self.calm_since > 60:
+                logging.info("dj: light mode off")
+                with self.lock:
+                    self.light = ""
+                    if self.request:  # a steer was waiting for the game to end: pick for it now
+                        self.gen += 1
+                        for r in self.buffer:
+                            r["status"] = "dropped"
+                        self.buffer.clear()
+                    self._bump()
+                if self.request and self.auto:
+                    threading.Thread(target=self._refill, daemon=True).start()
+
+    def light_pick(self, n=5):
+        """Picks without the AI model: songs from earlier DJ sessions for this game first, then DJ picks
+        the user liked or saved, then their Spotify favourites; never disliked or recently played ones."""
+        game = self.act.game
+        fb = self.data["feedback"]
+        cutoff = time.time() - 2 * 3600  # no repeats within a session, but older picks are fair game
+        recent = {_key(r["title"], r["artist"]) for r in self.data["recs"] if r.get("t", 0) > cutoff}
+        recent |= {_key(r["title"], r["artist"]) for r in self.buffer + self.upcoming}
+        if self.current:
+            recent.add(_key(self.current["title"], self.current["artist"]))
+        bad = {k for k, f in fb.items() if f.get("v", 0) < 0}
+        pools = [
+            [r for r in reversed(self.data["recs"]) if game and r.get("game") == game
+             and r.get("status") in ("played", "playing", "queued", "suggested", "lined up")],
+            [r for r in reversed(self.data["recs"]) if (fb.get(_key(r["title"], r["artist"])) or {}).get("v", 0) > 0],
+        ]
+        snap = self.spotify_snapshot() or {}
+        pools.append([t for rng in ("short_term", "medium_term") for t in snap.get(rng) or [] if t.get("uri")])
+        out, seen, artists = [], set(), set()
+        for pool in pools:
+            random.shuffle(pool)
+            for r in pool:
+                k = _key(r["title"], r["artist"])
+                a = _key("", r["artist"])
+                if k in seen or k in recent or k in bad or a in artists or not r.get("uri"):
+                    continue
+                seen.add(k)
+                artists.add(a)
+                why = ("Played well during " + game) if pool is pools[0] and game else \
+                      ("You liked this one" if pool is pools[1] else "One of your favourites")
+                out.append({"id": hashlib.sha1(f"{r['uri']}{time.time()}{len(out)}".encode()).hexdigest()[:10],
+                            "title": r["title"], "artist": r["artist"], "uri": r["uri"], "why": why,
+                            "game": game, "t": time.time(), "status": "suggested", "light": True})
+                if len(out) >= n:
+                    break
+            if len(out) >= n:
+                break
+        with self.lock:
+            self.data["recs"].extend(out)
+            self._bump()
+        self.save()
+        return out
+
     def _refill(self):
         if self.busy:
             return
@@ -319,7 +410,8 @@ class DJ:
         gen = self.gen
         self._bump()
         try:
-            picks = self.pick(5)
+            # light mode: no AI model at all (a steer is kept and used once the game is over)
+            picks = self.light_pick(5) if self.light else self.pick(5)
             with self.lock:
                 if gen != self.gen:  # steered (or game changed) while picking: these no longer fit
                     for r in picks:
@@ -345,6 +437,12 @@ class DJ:
         request = " ".join(str(request or "").split())[:200]
         if request.lower() in ("normal", "back to normal", "reset", "default", "clear", "none"):
             request = ""
+        if self.light:  # gaming: remember it, the AI picks for it once the game is over
+            with self.lock:
+                self.request = request
+                self._bump()
+            self.save()
+            return dict(self.status(), note="Saved for after the game: no AI runs while you play.")
         with self.lock:
             self.request = request
             self.gen += 1
@@ -365,8 +463,11 @@ class DJ:
     def _loop(self):
         while True:
             time.sleep(5)
+            try:
+                self._update_light()  # always: a game frees the GPU even with Auto off or Spotify closed
+            except Exception:
+                logging.exception("dj light check failed")
             if not self.music.app_open():
-                time.sleep(10)
                 continue
             try:
                 self._tick()
@@ -403,14 +504,11 @@ class DJ:
         # pick more songs (= wake the LLM on the GPU) only while music is actually playing
         if len(self.buffer) < 2 and not self.busy and n and n["playing"]:
             threading.Thread(target=self._refill, daemon=True).start()
-        # keep exactly one DJ song waiting in Spotify's queue while music is playing
-        left = None
-        live = self.music.now or {}
-        if live.get("duration"):
-            left = float(live["duration"]) - float(live.get("position") or 0) - (time.time() - live.get("at", time.time()))
+        # keep exactly one DJ song waiting in Spotify's queue while music is playing: it goes in as
+        # soon as a song starts, so Spotify's queue shows what's next (a steer skips it when it comes up)
         if time.time() < getattr(self, "pause_until", 0):
             return  # a queue call just failed: wait a minute before trying again
-        if n and n["playing"] and not self.upcoming and self.buffer and (left is None or left < 25):
+        if n and n["playing"] and not self.upcoming and self.buffer:
             with self.lock:
                 rec = self.buffer.pop(0)
             try:
@@ -435,7 +533,7 @@ class DJ:
             pub = lambda r: {k: r.get(k) for k in ("id", "title", "artist", "why", "status", "game")} if r else None
             return {"rev": self.rev, "auto": self.auto, "ready": spot.dj_ready(), "state": spot.status(),
                     "busy": self.busy, "error": self.error, "game": self.act.game, "mood": self.mood,
-                    "request": self.request,
+                    "request": self.request, "light": self.light,
                     "current": pub(self.current), "next": [pub(r) for r in (self.upcoming + self.buffer)[:3]],
                     "now": dict(n, feedback=(now_fb or {}).get("v", 0), saved=(now_fb or {}).get("saved", False)) if n else None,
                     "likes": sum(1 for f in fb.values() if f["v"] > 0), "dislikes": sum(1 for f in fb.values() if f["v"] < 0)}

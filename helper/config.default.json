@@ -85,6 +85,8 @@
     "query": "from:alerts@yourbank.example (transaction OR alert OR card)"
   },
   "music": {"enabled": true, "apps": ["spotify"]},
+  "dj": {"light_when_gaming": true, "gpu_limit": 40},
+  "gaming": {"stop_wallpaper": true},
   "spotify": {"client_id": ""},
   "exercise": {
     "enabled": true,

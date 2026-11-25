@@ -41,6 +41,7 @@ import spending as spending_mod
 import spotify_sync as spot
 import dj as dj_mod
 import display as display_mod
+import gameguard as gameguard_mod
 
 APP_DIR = os.path.join(os.environ["LOCALAPPDATA"], "HomeScreen")
 ICON_DIR = os.path.join(APP_DIR, "icons")
@@ -1357,6 +1358,13 @@ def chat_dj(args):
 CHAT = chat_mod.Chat(APP_DIR, _config, context=context, snapshot=snapshot,
                      tools={"add_calendar_event": chat_calendar, "spotify_playlist": chat_playlist, "recommend_songs": chat_recommend, "dj_control": chat_dj})
 DJ = dj_mod.DJ(APP_DIR, MUSIC, ACT, CHAT.complete_json)
+DJ.gpu_util = lambda: ((GPU.read() or {}).get("util") if GPU else None)
+DJ.chat_busy = lambda: bool(CHAT.data.get("busy"))
+DJ.unload = CHAT.unload
+DJ.limits = lambda: REG.load_config()[0].get("dj") or {}
+CHAT.gaming = lambda: bool(DJ.light)
+# a game in front: stop the wallpaper entirely (frees its VRAM), play it again after
+GUARD = gameguard_mod.GameGuard(lambda: (REG.load_config()[0].get("gaming") or {}).get("stop_wallpaper", True) is not False)
 DISPLAY = display_mod.Display(activity_mod.idle_seconds,
                               lambda: bool(ACT.game) or activity_mod.notification_state() in (2, 3, 4))
 DJ.spotify_snapshot = lambda: SPOT.data if isinstance(SPOT.data, dict) and SPOT.data.get("state") == "ok" else None
@@ -1560,6 +1568,7 @@ def main():
         sys.exit(1)
     ole32.CoInitializeEx(None, 0x2)  # apartment-threaded, needed for shell icon APIs
     GPU = Gpu()
+    GUARD.start()
     try:
         server = HTTPServer((HOST, PORT), Handler)
     except OSError:

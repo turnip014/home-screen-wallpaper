@@ -87,6 +87,36 @@ def running_exes(max_age=5.0):
         return names
 
 
+def exe_path(exe):
+    """Full path of a running process by exe name (first match), or None."""
+    exe = exe.lower()
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+    pid = None
+    if snap and snap != ctypes.c_void_p(-1).value:
+        try:
+            e = PROCESSENTRY32W()
+            e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                if e.szExeFile.lower() == exe:
+                    pid = e.th32ProcessID
+                    break
+                ok = kernel32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            kernel32.CloseHandle(snap)
+    if not pid:
+        return None
+    h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = wt.DWORD(1024)
+        return buf.value if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else None
+    finally:
+        kernel32.CloseHandle(h)
+
+
 def app_running(exe):
     return exe.lower() in running_exes()
 

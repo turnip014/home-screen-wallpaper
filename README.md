@@ -44,6 +44,12 @@ It's built so it never costs gaming performance.
   default) or while a game is running, every animation freezes and the live widgets stop polling. The
   page then draws no frames and the GPU can drop to idle clocks. Any input wakes it. While Spotify is
   closed, the music monitor and DJ go quiet, and the DJ only runs the local model while music plays.
+- **Game guard:** while a game is in front, the wallpaper is stopped entirely (Wallpaper Engine
+  unloads it, freeing its ~800 MB of VRAM) and comes back a few seconds after you leave the game.
+  No AI model runs either: the DJ plays songs it already knows fit (earlier picks for that game,
+  liked songs, Spotify favourites), steer requests wait until the game is over, and a loaded model
+  is unloaded. The same light mode starts when the GPU stays above `dj.gpu_limit` (40%). Turn the
+  wallpaper stop off with `"gaming": {"stop_wallpaper": false}` in config.json.
 - **Low refresh when idle:** after a longer idle (5 minutes by default) the helper drops the display to
   a low refresh rate (120 Hz if offered, else 60 Hz) so VRAM can clock down too. Any input restores the
   normal rate in under half a second. The change is never saved, so a reboot always comes back at the

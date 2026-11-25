@@ -1370,7 +1370,8 @@
     if (!d.ready) text = "Reconnect Spotify so Rora can queue and save songs";
     else if (d.error) text = d.error;
     else if (d.busy && !d.current) text = d.game ? `Picking songs for ${d.game}…` : "Picking songs for you…";
-    else if (d.current) text = `${d.game ? `🎮 ${d.game} · ` : ""}${d.current.why || d.mood || "Rora's pick"}`;
+    else if (d.current) text = `${d.game ? `🎮 ${d.game} · ` : ""}${d.light ? "light mode · " : ""}${d.current.why || d.mood || "Rora's pick"}`;
+    else if (d.light && d.auto) text = `Light mode (${d.light}): playing songs you know fit, no AI on the GPU`;
     else if (d.game) text = `🎮 ${d.game}${d.auto ? " · playing picks that fit" : " · turn on Auto for matching music"}`;
     else text = d.auto ? `Auto: picks keep coming${d.mood ? ` · ${d.mood}` : ""}` : "Turn on Auto and Rora keeps the music going";
     info.textContent = text;

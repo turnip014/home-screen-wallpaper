@@ -400,6 +400,7 @@ class Chat:
         self.tools = tools or {}  # extra tools run by the helper, e.g. spotify_playlist
         self.phase, self.phase_t = None, 0.0  # boot progress: "starting" (Ollama) -> "loading" (model into GPU)
         self.warming = False
+        self.gaming = lambda: False  # set by the helper: a game runs, keep the GPU free
         self.lock = threading.RLock()  # state() is also called while the lock is held
         self.stop_flag = threading.Event()
         self.data = self._load()
@@ -434,7 +435,8 @@ class Chat:
         c = self.get_config().get("chat") or {}
         return {
             "model": c.get("model") or "qwen3:30b",
-            "keep_alive": c.get("keep_alive") or "5m",
+            # while gaming, free the GPU 20 s after an answer instead of keeping the model loaded
+            "keep_alive": "20s" if self.gaming() else (c.get("keep_alive") or "5m"),
             "ollama": os.path.expandvars(c.get("ollama") or r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
             "models_dir": os.path.expandvars(c.get("models_dir") or ""),
             "auto_run": c.get("auto_run_readonly", True) is not False,
@@ -493,6 +495,8 @@ class Chat:
 
     def warm(self):
         """Start Ollama and load the model while the user is still typing (Ask box opened)."""
+        if self.gaming():
+            return  # don't preload the model mid-game; it loads only if a message is actually sent
         with self.lock:
             if self.warming or self.data.get("busy"):
                 return
@@ -538,6 +542,15 @@ class Chat:
             if self._up():
                 return True
         raise RuntimeError("Ollama didn't start")
+
+    def unload(self):
+        """Free the model's VRAM now (e.g. a game started). Harmless if it isn't loaded."""
+        try:
+            body = json.dumps({"model": self.settings()["model"], "keep_alive": 0}).encode()
+            req = urllib.request.Request(OLLAMA + "/api/generate", data=body, headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).read()
+        except Exception:
+            pass
 
     def complete_json(self, messages, schema, keep_alive=None, temperature=0.8, think=False):
         """One-off structured answer from the local model (used by Rora DJ; not shown in the chat)."""
